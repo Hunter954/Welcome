@@ -47,16 +47,11 @@ def init_db():
     bool_default = "FALSE" if _is_postgres() else "0"
     with conn() as c:
         cur = c.cursor()
-
-        # PostgreSQL can still raise duplicate pg_type errors when multiple
-        # Gunicorn workers execute CREATE TABLE IF NOT EXISTS concurrently.
-        # A session-level advisory lock serializes schema bootstrap safely.
         schema_lock_id = 684731920114
         if _is_postgres():
             cur.execute("SELECT pg_advisory_lock(%s)", (schema_lock_id,))
-
         try:
-            cur.execute(f"""
+            cur.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -81,6 +76,15 @@ def init_db():
                 error TEXT,
                 created_at TEXT NOT NULL
             )""")
+            cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS app_log (
+                id {serial},
+                level TEXT NOT NULL,
+                event TEXT NOT NULL,
+                message TEXT,
+                details TEXT,
+                created_at TEXT NOT NULL
+            )""")
         finally:
             if _is_postgres():
                 cur.execute("SELECT pg_advisory_unlock(%s)", (schema_lock_id,))
@@ -102,9 +106,15 @@ def set_setting(key, value):
     with conn() as c:
         cur = c.cursor()
         if _is_postgres():
-            cur.execute("INSERT INTO settings(key,value) VALUES(%s,%s) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value", (key, str(value)))
+            cur.execute(
+                "INSERT INTO settings(key,value) VALUES(%s,%s) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value",
+                (key, str(value)),
+            )
         else:
-            cur.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
+            cur.execute(
+                "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, str(value)),
+            )
         cur.close()
 
 
@@ -115,7 +125,7 @@ def rows(sql, params=()):
         result = cur.fetchall()
         cols = [d[0] for d in cur.description] if cur.description else []
         cur.close()
-        out=[]
+        out = []
         for r in result:
             if hasattr(r, "keys"):
                 out.append(dict(r))

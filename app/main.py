@@ -3,7 +3,15 @@ from functools import wraps
 from flask import Flask, flash, redirect, render_template, request, session, url_for
 
 from .db import init_db, rows
-from .instagram_service import login as ig_login, logout as ig_logout, save_config, start_worker, status, sync_once
+from .instagram_service import (
+    clear_saved_session,
+    login as ig_login,
+    logout as ig_logout,
+    save_config,
+    start_worker,
+    status,
+    sync_once,
+)
 
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "change-me-now")
@@ -48,21 +56,23 @@ def admin_logout():
 def dashboard():
     cfg = status()
     logs = rows("SELECT * FROM dm_log ORDER BY id DESC LIMIT 30")
+    diagnostic_logs = rows("SELECT * FROM app_log ORDER BY id DESC LIMIT 60")
     followers = rows("SELECT * FROM followers ORDER BY first_seen DESC LIMIT 30")
     counts = {
         "followers": rows("SELECT COUNT(*) AS n FROM followers")[0]["n"],
         "sent": rows("SELECT COUNT(*) AS n FROM dm_log WHERE status='sent'")[0]["n"],
         "errors": rows("SELECT COUNT(*) AS n FROM dm_log WHERE status='error'")[0]["n"],
     }
-    return render_template("dashboard.html", cfg=cfg, logs=logs, followers=followers, counts=counts)
+    return render_template("dashboard.html", cfg=cfg, logs=logs, diagnostic_logs=diagnostic_logs, followers=followers, counts=counts)
 
 
 @app.route("/instagram/login", methods=["POST"])
 @admin_required
 def instagram_login():
-    ok, msg = ig_login(request.form.get("username", "").strip(), request.form.get("password", ""), request.form.get("verification_code") or None)
+    username = request.form.get("username", "").strip()
+    ok, msg = ig_login(username, request.form.get("password", ""), request.form.get("verification_code") or None)
     if msg == "2FA_REQUIRED":
-        session["pending_ig_user"] = request.form.get("username", "").strip()
+        session["pending_ig_user"] = username
         session["pending_ig_pass"] = request.form.get("password", "")
         flash("Sua conta usa autenticação em 2 fatores. Digite o código e conecte novamente.", "warning")
         return redirect(url_for("dashboard", twofa="1"))
@@ -86,6 +96,14 @@ def instagram_2fa():
 def instagram_disconnect():
     ig_logout()
     flash("Conta do Instagram desconectada.", "success")
+    return redirect(url_for("dashboard"))
+
+
+@app.post("/instagram/clear-session")
+@admin_required
+def instagram_clear_session():
+    removed = clear_saved_session()
+    flash("Sessão salva apagada. Faça um login limpo agora." if removed else "Não havia arquivo de sessão salvo; o próximo login já será limpo.", "warning")
     return redirect(url_for("dashboard"))
 
 
