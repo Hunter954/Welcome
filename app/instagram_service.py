@@ -169,11 +169,11 @@ def status():
         "last_poll": get_setting("last_poll", "Nunca"),
         "last_error": get_setting("last_error", ""),
         "welcome_enabled": _bool(get_setting("welcome_enabled", os.getenv("WELCOME_ENABLED", "false"))),
-        "poll_seconds": _int_setting("poll_seconds", os.getenv("POLL_SECONDS", "90"), 60, 3600),
+        "poll_seconds": _int_setting("poll_seconds", os.getenv("POLL_SECONDS", "1"), 1, 3600),
         "max_dms_per_hour": _int_setting("max_dms_per_hour", os.getenv("MAX_DMS_PER_HOUR", "12"), 1, 50),
         "max_dms_per_day": _int_setting("max_dms_per_day", "80", 1, 500),
-        "min_dm_delay_seconds": _int_setting("min_dm_delay_seconds", os.getenv("MIN_DM_DELAY_SECONDS", "25"), 10, 600),
-        "max_dm_delay_seconds": _int_setting("max_dm_delay_seconds", "45", 10, 900),
+        "min_dm_delay_seconds": _int_setting("min_dm_delay_seconds", os.getenv("MIN_DM_DELAY_SECONDS", "1"), 0, 600),
+        "max_dm_delay_seconds": _int_setting("max_dm_delay_seconds", "2", 0, 900),
         "max_retries": _int_setting("max_retries", "3", 0, 10),
         "welcome_message": get_setting("welcome_message", "Olá, {first_name}! 👋 Obrigado por seguir @{account}. Seja muito bem-vindo(a)!"),
         "alternate_enabled": _bool(get_setting("alternate_enabled", "false")),
@@ -194,11 +194,11 @@ def save_config(message, enabled, poll_seconds, max_dms_per_hour, min_delay,
                 max_dms_per_day=80, max_delay=45, max_retries=3, alternate_enabled=False,
                 alternate_message="", schedule_enabled=False, schedule_start="09:00",
                 schedule_end="21:00", schedule_days="0,1,2,3,4,5,6", excluded_usernames=""):
-    min_delay_i = max(10, int(min_delay))
+    min_delay_i = max(0, int(min_delay))
     max_delay_i = max(min_delay_i, int(max_delay))
     set_setting("welcome_message", message.strip())
     set_setting("welcome_enabled", str(bool(enabled)).lower())
-    set_setting("poll_seconds", max(60, min(3600, int(poll_seconds))))
+    set_setting("poll_seconds", max(1, min(3600, int(poll_seconds))))
     set_setting("max_dms_per_hour", max(1, min(50, int(max_dms_per_hour))))
     set_setting("max_dms_per_day", max(1, min(500, int(max_dms_per_day))))
     set_setting("min_dm_delay_seconds", min_delay_i)
@@ -695,7 +695,9 @@ async def _sync_once_async(send_messages=True):
                     execute("INSERT INTO dm_log(follower_pk,username,status,message,error,created_at) VALUES(?,?,?,?,?,?)", (follower_pk, row["username"], "sent", msg, None, utcnow()))
                     sent += 1
                     log_event("INFO", "dm_sent", f"Boas-vindas enviada para @{row['username']}", {"variant": variant})
-                    await asyncio.sleep(random.randint(cfg["min_dm_delay_seconds"], cfg["max_dm_delay_seconds"]))
+                    delay = random.randint(cfg["min_dm_delay_seconds"], cfg["max_dm_delay_seconds"])
+                    if delay > 0:
+                        await asyncio.sleep(delay)
                 except Exception as e:
                     error_text = f"{type(e).__name__}: {e}"
                     execute("UPDATE followers SET last_error=? WHERE pk=?", (error_text, follower_pk))
@@ -765,7 +767,7 @@ def mark_pending_as_baseline():
 
 
 def worker_loop():
-    log_event("INFO", "worker_started", "Worker de sincronização iniciado")
+    log_event("INFO", "worker_started", "Worker de sincronização iniciado", {"mode": "near_realtime", "poll_seconds": status()["poll_seconds"]})
     while True:
         try:
             if status()["connected"]:
@@ -774,7 +776,7 @@ def worker_loop():
             set_setting("last_error", f"Worker: {type(e).__name__}: {e}")
             log_event("ERROR", "worker_error", f"{type(e).__name__}: {e}")
         import time
-        time.sleep(max(60, status()["poll_seconds"]))
+        time.sleep(max(1, status()["poll_seconds"]))
 
 
 def start_worker():
