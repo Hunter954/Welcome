@@ -1,6 +1,8 @@
 import asyncio
 import json
 import logging
+import hashlib
+import shutil
 import os
 import random
 import sys
@@ -31,6 +33,8 @@ from .db import _is_postgres, execute, get_setting, rows, set_setting, utcnow
 DATA_DIR = os.getenv("DATA_DIR", os.path.join(os.getcwd(), "data"))
 Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
 SESSION_FILE = os.path.join(DATA_DIR, "instagram_session.json")
+SESSION_BACKUP_FILE = os.path.join(DATA_DIR, "instagram_session.backup.json")
+IG_PROXY_URL = os.getenv("IG_PROXY_URL", "").strip()
 
 LOGGER = logging.getLogger("instagram_automation")
 if not LOGGER.handlers:
@@ -156,6 +160,8 @@ def status():
         "max_dms_per_hour": int(get_setting("max_dms_per_hour", os.getenv("MAX_DMS_PER_HOUR", "12"))),
         "min_dm_delay_seconds": int(get_setting("min_dm_delay_seconds", os.getenv("MIN_DM_DELAY_SECONDS", "25"))),
         "welcome_message": get_setting("welcome_message", "Olá, {first_name}! 👋 Obrigado por seguir @{account}. Seja muito bem-vindo(a)!"),
+        "session_saved": os.path.exists(SESSION_FILE),
+        "proxy_configured": bool(IG_PROXY_URL),
     }
 
 
@@ -168,17 +174,69 @@ def save_config(message, enabled, poll_seconds, max_dms_per_hour, min_delay):
     log_event("INFO", "config_saved", "Configurações da automação salvas")
 
 
+def _session_fingerprint(path=SESSION_FILE):
+    try:
+        data = Path(path).read_bytes()
+        return hashlib.sha256(data).hexdigest()[:12]
+    except Exception:
+        return None
+
+
+def _safe_dump_settings(cl):
+    """Grava a sessão de forma atômica e mantém uma cópia de segurança."""
+    tmp = SESSION_FILE + ".tmp"
+    try:
+        cl.dump_settings(tmp)
+        if os.path.exists(SESSION_FILE):
+            try:
+                shutil.copy2(SESSION_FILE, SESSION_BACKUP_FILE)
+            except Exception:
+                pass
+        os.replace(tmp, SESSION_FILE)
+        log_event("INFO", "session_saved", "Sessão do aiograpi persistida", {
+            "fingerprint": _session_fingerprint(),
+            "backup_exists": os.path.exists(SESSION_BACKUP_FILE),
+        })
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+
+
 async def _new_client(load_saved_session=True):
     cl = Client()
     cl.delay_range = [1, 3]
+    if IG_PROXY_URL:
+        try:
+            cl.set_proxy(IG_PROXY_URL)
+            log_event("INFO", "proxy_configured", "Proxy estável configurado para o Instagram", {"configured": True})
+        except Exception as e:
+            log_event("ERROR", "proxy_config_failed", f"Falha ao configurar proxy: {type(e).__name__}: {e}")
     session_loaded = False
     session_error = None
     if load_saved_session and os.path.exists(SESSION_FILE):
         try:
             cl.load_settings(SESSION_FILE)
             session_loaded = True
+            log_event("INFO", "session_loaded", "Sessão persistida carregada no aiograpi", {
+                "fingerprint": _session_fingerprint(),
+                "proxy_configured": bool(IG_PROXY_URL),
+            })
         except Exception as e:
             session_error = f"{type(e).__name__}: {e}"
+            # Se a sessão principal estiver corrompida, tenta a cópia de segurança.
+            if os.path.exists(SESSION_BACKUP_FILE):
+                try:
+                    cl.load_settings(SESSION_BACKUP_FILE)
+                    session_loaded = True
+                    session_error = None
+                    log_event("WARNING", "session_backup_loaded", "Sessão principal falhou; backup carregado", {
+                        "fingerprint": _session_fingerprint(SESSION_BACKUP_FILE),
+                    })
+                except Exception as backup_error:
+                    session_error += f" | backup: {type(backup_error).__name__}: {backup_error}"
     setattr(cl, "_automation_session_loaded", session_loaded)
     if session_error:
         log_event("WARNING", "session_load_failed", "Falha ao carregar sessão salva", {"error": session_error})
@@ -203,7 +261,7 @@ async def _restore_client_async():
     try:
         await cl.login(username, password)
         info = await cl.account_info()
-        cl.dump_settings(SESSION_FILE)
+        _safe_dump_settings(cl)
         set_setting("ig_connected", "true")
         set_setting("last_error", "")
         client = cl
@@ -242,7 +300,7 @@ async def _login_async(username, password, verification_code=None):
             await cl.login(username, password)
         log_event("INFO", "login_api_accepted", "Instagram aceitou a autenticação; validando conta", {"attempt_id": attempt_id})
         info = await cl.account_info()
-        cl.dump_settings(SESSION_FILE)
+        _safe_dump_settings(cl)
         set_setting("ig_username", username)
         set_setting("ig_password_enc", encrypt(password))
         set_setting("ig_connected", "true")
@@ -315,11 +373,13 @@ def logout():
         client = None
         set_setting("ig_connected", "false")
         set_setting("ig_password_enc", "")
-        try:
-            os.remove(SESSION_FILE)
-            removed = True
-        except FileNotFoundError:
-            removed = False
+        removed = False
+        for path in (SESSION_FILE, SESSION_BACKUP_FILE):
+            try:
+                os.remove(path)
+                removed = True
+            except FileNotFoundError:
+                pass
         log_event("INFO", "instagram_logout", "Conta desconectada do painel", {"session_file_removed": removed})
 
 
@@ -328,11 +388,13 @@ def clear_saved_session():
     with CLIENT_LOCK:
         client = None
         set_setting("ig_connected", "false")
-        try:
-            os.remove(SESSION_FILE)
-            removed = True
-        except FileNotFoundError:
-            removed = False
+        removed = False
+        for path in (SESSION_FILE, SESSION_BACKUP_FILE):
+            try:
+                os.remove(path)
+                removed = True
+            except FileNotFoundError:
+                pass
         log_event("WARNING", "saved_session_cleared", "Sessão local do Instagram foi limpa manualmente", {"session_file_removed": removed})
         return removed
 

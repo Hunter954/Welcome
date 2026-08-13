@@ -63,3 +63,16 @@ flask --app app.main run --debug
 - Se aparecer challenge, abra o app oficial do Instagram, aprove o login e depois tente reconectar.
 - Comece com limites conservadores. Não use esta base para spam, listas compradas ou DMs em massa.
 - O worker é executado dentro do mesmo processo web. O `Procfile` fixa 1 worker para impedir dois loops enviando DMs duplicadas.
+
+
+## Sessão persistente e IP estável (aiograpi)
+
+O sistema salva a sessão completa do aiograpi em `${DATA_DIR}/instagram_session.json` e cria também `${DATA_DIR}/instagram_session.backup.json`. No Railway, mantenha um Volume montado no mesmo `DATA_DIR` (recomendado `/data`) para a sessão sobreviver aos deploys.
+
+Opcionalmente, você pode definir no Railway:
+
+```env
+IG_PROXY_URL=http://usuario:senha@host:porta
+```
+
+Use apenas um proxy estável confiável e mantenha o mesmo IP para a mesma conta. O valor não é exibido nos logs nem no painel; o painel mostra somente se ele está configurado. Se não usar proxy, deixe `IG_PROXY_URL` ausente.
