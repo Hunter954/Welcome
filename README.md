@@ -76,3 +76,16 @@ IG_PROXY_URL=http://usuario:senha@host:porta
 ```
 
 Use apenas um proxy estável confiável e mantenha o mesmo IP para a mesma conta. O valor não é exibido nos logs nem no painel; o painel mostra somente se ele está configurado. Se não usar proxy, deixe `IG_PROXY_URL` ausente.
+
+## Importar uma sessão já aberta no Chrome
+
+O painel também aceita uma sessão web já autenticada no `instagram.com`.
+
+1. Abra o Instagram no Chrome na conta desejada.
+2. No painel da automação, abra **Importar sessão do Chrome**.
+3. Cole apenas o valor do cookie `sessionid`, um Cookie header completo, ou um JSON/.txt exportado dos cookies do `instagram.com`.
+4. Clique em **Validar e importar sessão**.
+
+O backend extrai somente o `sessionid` e chama `aiograpi.Client.login_by_sessionid()`. Se o Instagram aceitar a sessão na API privada, o sistema valida com `account_info()`, salva os settings persistentes em `/data/instagram_session.json` e guarda o `sessionid` criptografado apenas como fallback de restauração.
+
+> Observação: uma sessão válida no navegador pode ser recusada pela API privada/mobile do Instagram. Nesse caso, o painel registra `browser_session_import_failed` com o tipo técnico do erro, sem expor o cookie nos logs.

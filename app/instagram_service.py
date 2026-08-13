@@ -162,6 +162,7 @@ def status():
         "welcome_message": get_setting("welcome_message", "Olá, {first_name}! 👋 Obrigado por seguir @{account}. Seja muito bem-vindo(a)!"),
         "session_saved": os.path.exists(SESSION_FILE),
         "proxy_configured": bool(IG_PROXY_URL),
+        "auth_mode": get_setting("ig_auth_mode", "password"),
     }
 
 
@@ -247,25 +248,60 @@ async def _restore_client_async():
     global client
     if client is not None:
         return client
+
     username = get_setting("ig_username")
-    enc = get_setting("ig_password_enc")
-    if not username or not enc:
+    enc_password = get_setting("ig_password_enc")
+    enc_sessionid = get_setting("ig_sessionid_enc")
+    if not username:
         return None
+
     cl = await _new_client(load_saved_session=True)
-    password = decrypt(enc)
     attempt_id = uuid.uuid4().hex[:10]
     session_loaded = getattr(cl, "_automation_session_loaded", False)
     log_event("INFO", "session_restore_started", "Tentando restaurar sessão do Instagram", {
-        "attempt_id": attempt_id, "username": username, "session_loaded": session_loaded,
+        "attempt_id": attempt_id,
+        "username": username,
+        "session_loaded": session_loaded,
+        "auth_mode": get_setting("ig_auth_mode", "password"),
+        "has_password_fallback": bool(enc_password),
+        "has_sessionid_fallback": bool(enc_sessionid),
     })
+
+    # Primeiro tenta usar diretamente os settings persistidos. Isso evita um novo
+    # login e preserva a identidade/dispositivo já aceitos pelo Instagram.
+    if session_loaded:
+        try:
+            info = await cl.account_info()
+            set_setting("ig_connected", "true")
+            set_setting("last_error", "")
+            client = cl
+            log_event("INFO", "session_restore_success", f"Sessão persistida validada para @{info.username}", {
+                "attempt_id": attempt_id, "method": "saved_settings",
+            })
+            return client
+        except Exception as saved_error:
+            log_event("WARNING", "saved_session_validation_failed", "Settings salvos não foram aceitos; tentando fallback de autenticação", _exception_details(saved_error, cl, attempt_id, username, session_loaded))
+
     try:
-        await cl.login(username, password)
+        if enc_sessionid:
+            sessionid = decrypt(enc_sessionid)
+            await cl.login_by_sessionid(sessionid)
+            method = "sessionid"
+        elif enc_password:
+            password = decrypt(enc_password)
+            await cl.login(username, password)
+            method = "password"
+        else:
+            raise LoginRequired("Nenhum método de autenticação de fallback disponível")
+
         info = await cl.account_info()
         _safe_dump_settings(cl)
         set_setting("ig_connected", "true")
         set_setting("last_error", "")
         client = cl
-        log_event("INFO", "session_restore_success", f"Sessão restaurada para @{info.username}", {"attempt_id": attempt_id})
+        log_event("INFO", "session_restore_success", f"Sessão restaurada para @{info.username}", {
+            "attempt_id": attempt_id, "method": method,
+        })
         return client
     except Exception as e:
         err = f"Falha ao restaurar sessão: {type(e).__name__}: {e}"
@@ -303,6 +339,8 @@ async def _login_async(username, password, verification_code=None):
         _safe_dump_settings(cl)
         set_setting("ig_username", username)
         set_setting("ig_password_enc", encrypt(password))
+        set_setting("ig_sessionid_enc", "")
+        set_setting("ig_auth_mode", "password")
         set_setting("ig_connected", "true")
         set_setting("last_error", "")
         client = cl
@@ -367,12 +405,101 @@ def login(username, password, verification_code=None):
         return _run_async(_login_async(username, password, verification_code))
 
 
+def _extract_sessionid(raw):
+    """Aceita sessionid puro, Cookie header ou JSON exportado pelo navegador."""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+
+    # JSON: {"sessionid": "..."}, {"cookies": [...]}, ou lista de cookies.
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            direct = data.get("sessionid")
+            if direct:
+                return str(direct).strip()
+            data = data.get("cookies", data.get("data", data))
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict) and str(item.get("name", "")).lower() == "sessionid":
+                    value = item.get("value")
+                    if value:
+                        return str(value).strip()
+    except Exception:
+        pass
+
+    # Cookie header / export textual: sessionid=VALUE; csrftoken=...
+    import re
+    match = re.search(r'(?:^|[;\s])sessionid\s*=\s*([^;\s]+)', raw, flags=re.I)
+    if match:
+        return match.group(1).strip().strip('"\'')
+
+    # Netscape cookie export: domínio, flags, path, secure, expires, name, value.
+    for line in raw.splitlines():
+        parts = line.strip().split('\t')
+        if len(parts) >= 7 and parts[-2].lower() == "sessionid" and parts[-1]:
+            return parts[-1].strip()
+
+    # Se não parece estrutura de cookie, assume que o usuário colou apenas o valor.
+    if "=" not in raw and "\n" not in raw and "\r" not in raw and len(raw) >= 10:
+        return raw
+    return None
+
+
+async def _import_browser_session_async(raw):
+    global client
+    attempt_id = uuid.uuid4().hex[:10]
+    sessionid = _extract_sessionid(raw)
+    log_event("INFO", "browser_session_import_started", "Importação manual de sessão do navegador iniciada", {
+        "attempt_id": attempt_id,
+        "payload_format_detected": "sessionid" if sessionid else "unknown",
+        "payload_length": len(raw or ""),
+    })
+    if not sessionid:
+        msg = "Não encontrei o cookie sessionid. Cole o valor do sessionid, o Cookie header ou um JSON exportado do instagram.com."
+        log_event("WARNING", "browser_session_missing_sessionid", msg, {"attempt_id": attempt_id})
+        return False, msg
+
+    cl = await _new_client(load_saved_session=False)
+    try:
+        await cl.login_by_sessionid(sessionid)
+        info = await cl.account_info()
+        _safe_dump_settings(cl)
+        set_setting("ig_username", info.username or "")
+        set_setting("ig_password_enc", "")
+        set_setting("ig_sessionid_enc", encrypt(sessionid))
+        set_setting("ig_auth_mode", "browser_session")
+        set_setting("ig_connected", "true")
+        set_setting("last_error", "")
+        client = cl
+        log_event("INFO", "browser_session_import_success", f"Sessão do navegador validada para @{info.username}", {
+            "attempt_id": attempt_id,
+            "instagram_user_id": str(getattr(info, "pk", "")),
+            "session_fingerprint": _session_fingerprint(),
+        })
+        return True, f"Sessão importada e validada. Conectado como @{info.username}"
+    except Exception as e:
+        msg = f"O Instagram não aceitou esse sessionid para a API privada: {type(e).__name__}: {e}"
+        set_setting("last_error", msg)
+        details = _exception_details(e, cl, attempt_id, None, False)
+        details["import_method"] = "login_by_sessionid"
+        log_event("ERROR", "browser_session_import_failed", msg, details)
+        return False, msg
+
+
+def import_browser_session(raw):
+    with CLIENT_LOCK:
+        return _run_async(_import_browser_session_async(raw))
+
+
 def logout():
     global client
     with CLIENT_LOCK:
         client = None
         set_setting("ig_connected", "false")
         set_setting("ig_password_enc", "")
+        set_setting("ig_sessionid_enc", "")
+        set_setting("ig_auth_mode", "password")
         removed = False
         for path in (SESSION_FILE, SESSION_BACKUP_FILE):
             try:
@@ -388,6 +515,9 @@ def clear_saved_session():
     with CLIENT_LOCK:
         client = None
         set_setting("ig_connected", "false")
+        set_setting("ig_sessionid_enc", "")
+        if get_setting("ig_auth_mode", "password") == "browser_session":
+            set_setting("ig_auth_mode", "password")
         removed = False
         for path in (SESSION_FILE, SESSION_BACKUP_FILE):
             try:

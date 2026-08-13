@@ -5,6 +5,7 @@ from flask import Flask, flash, redirect, render_template, request, session, url
 from .db import init_db, rows
 from .instagram_service import (
     clear_saved_session,
+    import_browser_session,
     login as ig_login,
     logout as ig_logout,
     save_config,
@@ -87,6 +88,26 @@ def instagram_2fa():
     password = session.pop("pending_ig_pass", "")
     code = request.form.get("verification_code", "").strip()
     ok, msg = ig_login(user, password, code)
+    flash(msg, "success" if ok else "danger")
+    return redirect(url_for("dashboard"))
+
+
+@app.post("/instagram/import-session")
+@admin_required
+def instagram_import_session():
+    raw = request.form.get("session_data", "")
+    upload = request.files.get("session_file")
+    if upload and upload.filename:
+        try:
+            blob = upload.read(100_001)
+            if len(blob) > 100_000:
+                flash("O arquivo de cookies é grande demais. Exporte somente os cookies do instagram.com ou cole apenas o sessionid.", "danger")
+                return redirect(url_for("dashboard"))
+            raw = blob.decode("utf-8", errors="replace")
+        except Exception as e:
+            flash(f"Não consegui ler o arquivo enviado: {type(e).__name__}", "danger")
+            return redirect(url_for("dashboard"))
+    ok, msg = import_browser_session(raw)
     flash(msg, "success" if ok else "danger")
     return redirect(url_for("dashboard"))
 
