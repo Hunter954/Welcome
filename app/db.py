@@ -46,32 +46,44 @@ def init_db():
     booltype = "BOOLEAN" if _is_postgres() else "INTEGER"
     with conn() as c:
         cur = c.cursor()
-        cur.execute(f"""
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        )""")
-        cur.execute(f"""
-        CREATE TABLE IF NOT EXISTS followers (
-            pk TEXT PRIMARY KEY,
-            username TEXT,
-            full_name TEXT,
-            first_seen TEXT NOT NULL,
-            welcomed {booltype} NOT NULL DEFAULT 0,
-            welcomed_at TEXT,
-            last_error TEXT
-        )""")
-        cur.execute(f"""
-        CREATE TABLE IF NOT EXISTS dm_log (
-            id {serial},
-            follower_pk TEXT,
-            username TEXT,
-            status TEXT NOT NULL,
-            message TEXT,
-            error TEXT,
-            created_at TEXT NOT NULL
-        )""")
-        cur.close()
+
+        # PostgreSQL can still raise duplicate pg_type errors when multiple
+        # Gunicorn workers execute CREATE TABLE IF NOT EXISTS concurrently.
+        # A session-level advisory lock serializes schema bootstrap safely.
+        schema_lock_id = 684731920114
+        if _is_postgres():
+            cur.execute("SELECT pg_advisory_lock(%s)", (schema_lock_id,))
+
+        try:
+            cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )""")
+            cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS followers (
+                pk TEXT PRIMARY KEY,
+                username TEXT,
+                full_name TEXT,
+                first_seen TEXT NOT NULL,
+                welcomed {booltype} NOT NULL DEFAULT 0,
+                welcomed_at TEXT,
+                last_error TEXT
+            )""")
+            cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS dm_log (
+                id {serial},
+                follower_pk TEXT,
+                username TEXT,
+                status TEXT NOT NULL,
+                message TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL
+            )""")
+        finally:
+            if _is_postgres():
+                cur.execute("SELECT pg_advisory_unlock(%s)", (schema_lock_id,))
+            cur.close()
 
 
 def get_setting(key, default=None):
