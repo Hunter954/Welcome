@@ -53,6 +53,9 @@ client = None
 worker_started = False
 ROLE_CLIENTS = {}
 ROLE_CLIENTS_LOCK = threading.RLock()
+DETECTOR_COOLDOWN_UNTIL = None
+DETECTOR_RATE_LIMIT_HITS = 0
+DETECTOR_STATE_LOCK = threading.RLock()
 
 
 SENSITIVE_WORDS = (
@@ -172,9 +175,9 @@ def status():
         "last_poll": get_setting("last_poll", "Nunca"),
         "last_error": get_setting("last_error", ""),
         "welcome_enabled": _bool(get_setting("welcome_enabled", os.getenv("WELCOME_ENABLED", "false"))),
-        # Modo rápido fixo: o painel não expõe mais polling/limites/delays.
-        # O detector consulta a cada 1s e o remetente usa no máximo 1s entre DMs.
-        "poll_seconds": 1,
+        # Polling conservador: consulta novos seguidores a cada 15s.
+        # Quando detectado, o envio da DM continua imediato.
+        "poll_seconds": 15,
         "max_dms_per_hour": 50,
         "max_dms_per_day": 300,
         "min_dm_delay_seconds": 0,
@@ -206,7 +209,7 @@ def save_config(message, enabled, excluded_usernames=""):
     set_setting("excluded_usernames", excluded_usernames.strip())
 
     # Neutraliza valores antigos que possam ter ficado persistidos no banco.
-    set_setting("poll_seconds", 1)
+    set_setting("poll_seconds", 15)
     set_setting("min_dm_delay_seconds", 0)
     set_setting("max_dm_delay_seconds", 1)
     set_setting("alternate_enabled", "false")
@@ -215,8 +218,8 @@ def save_config(message, enabled, excluded_usernames=""):
 
     log_event("INFO", "config_saved", "Configurações da automação salvas", {
         "enabled": bool(enabled),
-        "mode": "near_realtime",
-        "poll_seconds": 1,
+        "mode": "safe_realtime",
+        "poll_seconds": 15,
         "dm_delay_seconds": "0-1",
     })
 
@@ -712,7 +715,8 @@ def _upsert_detected_followers(followers, baseline=False):
 
 
 async def _detect_followers_async(force_full=False):
-    """Polling rápido: após a base, busca somente os 50 seguidores mais recentes, ordenados por data."""
+    """Polling seguro: após a base, busca somente os 50 seguidores mais recentes, ordenados por data."""
+    global DETECTOR_COOLDOWN_UNTIL, DETECTOR_RATE_LIMIT_HITS
     try:
         cl = await _role_client_async("detector")
         me_id = get_setting("ig_user_id", "")
@@ -741,7 +745,50 @@ async def _detect_followers_async(force_full=False):
             "new": 0 if baseline else new_count,
             "seconds": round(elapsed, 3),
         })
+        with DETECTOR_STATE_LOCK:
+            DETECTOR_RATE_LIMIT_HITS = 0
+            DETECTOR_COOLDOWN_UNTIL = None
         return {"ok": True, "new": 0 if baseline else new_count, "baseline": baseline, "total": len(followers)}
+    except PleaseWaitFewMinutes as e:
+        with DETECTOR_STATE_LOCK:
+            DETECTOR_RATE_LIMIT_HITS += 1
+            # 5, 10, 20, 30 minutos conforme reincidência; reseta após uma consulta bem-sucedida.
+            minutes = min(30, 5 * (2 ** max(0, DETECTOR_RATE_LIMIT_HITS - 1)))
+            DETECTOR_COOLDOWN_UNTIL = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+        set_setting("last_poll", utcnow())
+        set_setting("last_error", f"Detector em cooldown por {minutes} min: PleaseWaitFewMinutes")
+        with ROLE_CLIENTS_LOCK:
+            ROLE_CLIENTS.pop("detector", None)
+        log_event("WARNING", "detector_rate_limited", "Instagram pediu para aguardar; detector entrou em cooldown", {
+            "cooldown_minutes": minutes,
+            "cooldown_until": DETECTOR_COOLDOWN_UNTIL.isoformat(),
+            "error": f"{type(e).__name__}: {e}",
+        })
+        return {"ok": False, "message": f"PleaseWaitFewMinutes: cooldown {minutes} min", "cooldown": minutes}
+    except ClientThrottledError as e:
+        with DETECTOR_STATE_LOCK:
+            DETECTOR_RATE_LIMIT_HITS += 1
+            minutes = min(30, 5 * (2 ** max(0, DETECTOR_RATE_LIMIT_HITS - 1)))
+            DETECTOR_COOLDOWN_UNTIL = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+        set_setting("last_poll", utcnow())
+        set_setting("last_error", f"Detector em cooldown por {minutes} min: rate limit")
+        with ROLE_CLIENTS_LOCK:
+            ROLE_CLIENTS.pop("detector", None)
+        log_event("WARNING", "detector_throttled", "Instagram limitou as consultas; detector entrou em cooldown", {
+            "cooldown_minutes": minutes,
+            "cooldown_until": DETECTOR_COOLDOWN_UNTIL.isoformat(),
+        })
+        return {"ok": False, "message": f"Rate limit: cooldown {minutes} min", "cooldown": minutes}
+    except (ClientLoginRequired, LoginRequired) as e:
+        set_setting("last_poll", utcnow())
+        set_setting("last_error", f"Sessão do Instagram precisa ser renovada: {type(e).__name__}: {e}")
+        set_setting("ig_connected", "false")
+        with ROLE_CLIENTS_LOCK:
+            ROLE_CLIENTS.pop("detector", None)
+        log_event("ERROR", "detector_login_required", "Sessão invalidada; automação pausada até reconectar/importar a sessão novamente", {
+            "error": f"{type(e).__name__}: {e}"
+        })
+        return {"ok": False, "message": f"{type(e).__name__}: {e}", "reauth_required": True}
     except Exception as e:
         set_setting("last_poll", utcnow())
         set_setting("last_error", f"Detector: {type(e).__name__}: {e}")
@@ -877,15 +924,26 @@ def mark_pending_as_baseline():
 
 
 def detector_loop():
-    log_event("INFO", "detector_started", "Detector rápido de novos seguidores iniciado", {"mode": "latest_50"})
+    log_event("INFO", "detector_started", "Detector seguro de novos seguidores iniciado", {
+        "mode": "latest_50",
+        "poll_seconds": 15,
+        "automatic_cooldown": True,
+    })
+    import time
     while True:
         try:
+            now = datetime.now(timezone.utc)
+            with DETECTOR_STATE_LOCK:
+                cooldown_until = DETECTOR_COOLDOWN_UNTIL
+            if cooldown_until and now < cooldown_until:
+                remaining = max(1, int((cooldown_until - now).total_seconds()))
+                time.sleep(min(15, remaining))
+                continue
             if status()["connected"]:
                 _run_async(_detect_followers_async(), timeout=120)
         except Exception as e:
             log_event("ERROR", "detector_loop_error", f"{type(e).__name__}: {e}")
-        import time
-        time.sleep(max(1, status()["poll_seconds"]))
+        time.sleep(15)
 
 
 def sender_loop():
