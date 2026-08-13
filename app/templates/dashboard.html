@@ -80,40 +80,13 @@
             <label class="form-check-label fw-semibold" for="welcome_enabled">Enviar boas-vindas automaticamente</label>
           </div>
 
-          <label class="form-label fw-semibold">Mensagem principal <span class="badge text-bg-light">Variante A</span></label>
+          <label class="form-label fw-semibold">Mensagem de boas-vindas</label>
           <textarea class="form-control mb-2" rows="5" id="welcome_message" name="welcome_message" required>{{ cfg.welcome_message }}</textarea>
-          <div class="small text-secondary mb-3">Variáveis: <code>{first_name}</code> <code>{username}</code> <code>{account}</code></div>
+          <div class="small text-secondary mb-4">Variáveis: <code>{first_name}</code> <code>{username}</code> <code>{account}</code></div>
 
-          <div class="border rounded-4 p-3 mb-4 bg-body-tertiary">
-            <div class="form-check form-switch mb-2">
-              <input class="form-check-input" type="checkbox" id="alternate_enabled" name="alternate_enabled" {% if cfg.alternate_enabled %}checked{% endif %}>
-              <label class="form-check-label fw-semibold" for="alternate_enabled">Teste A/B de mensagem</label>
-            </div>
-            <small class="text-secondary d-block mb-2">Quando ativo, alterna aproximadamente 50/50 entre A e B.</small>
-            <textarea class="form-control" rows="4" name="welcome_message_alt" placeholder="Mensagem variante B">{{ cfg.welcome_message_alt }}</textarea>
-          </div>
-
-          <div class="row g-3 mb-4">
-            <div class="col-md-4"><label class="form-label">Verificar a cada</label><div class="input-group"><input class="form-control" type="number" min="1" max="3600" name="poll_seconds" value="{{ cfg.poll_seconds }}"><span class="input-group-text">seg</span></div></div>
-            <div class="col-12"><div class="alert alert-info py-2 small mb-0"><b>Modo quase em tempo real:</b> use <b>1 segundo</b> para detectar novos seguidores o mais rápido possível. O primeiro envio não recebe atraso artificial; o delay de 1–2 s só separa mensagens quando houver várias pessoas na fila.</div></div>
-            <div class="col-md-4"><label class="form-label">Máx. por hora</label><input class="form-control" type="number" min="1" max="50" name="max_dms_per_hour" value="{{ cfg.max_dms_per_hour }}"></div>
-            <div class="col-md-4"><label class="form-label">Máx. por dia</label><input class="form-control" type="number" min="1" max="500" name="max_dms_per_day" value="{{ cfg.max_dms_per_day }}"></div>
-            <div class="col-md-4"><label class="form-label">Delay mínimo</label><div class="input-group"><input class="form-control" type="number" min="0" name="min_dm_delay_seconds" value="{{ cfg.min_dm_delay_seconds }}"><span class="input-group-text">seg</span></div></div>
-            <div class="col-md-4"><label class="form-label">Delay máximo</label><div class="input-group"><input class="form-control" type="number" min="0" name="max_dm_delay_seconds" value="{{ cfg.max_dm_delay_seconds }}"><span class="input-group-text">seg</span></div></div>
-            <div class="col-md-4"><label class="form-label">Tentativas por pessoa</label><input class="form-control" type="number" min="0" max="10" name="max_retries" value="{{ cfg.max_retries }}"><div class="form-text">0 = sem limite</div></div>
-          </div>
-
-          <div class="border rounded-4 p-3 mb-4">
-            <div class="form-check form-switch mb-3">
-              <input class="form-check-input" type="checkbox" id="schedule_enabled" name="schedule_enabled" {% if cfg.schedule_enabled %}checked{% endif %}>
-              <label class="form-check-label fw-semibold" for="schedule_enabled">Usar horário de funcionamento</label>
-            </div>
-            <div class="row g-3 align-items-end">
-              <div class="col-sm-6 col-md-3"><label class="form-label">Início</label><input class="form-control" type="time" name="schedule_start" value="{{ cfg.schedule_start }}"></div>
-              <div class="col-sm-6 col-md-3"><label class="form-label">Fim</label><input class="form-control" type="time" name="schedule_end" value="{{ cfg.schedule_end }}"></div>
-              <div class="col-md-6"><label class="form-label d-block">Dias</label>{% set active_days = cfg.schedule_days.split(',') %}<div class="d-flex flex-wrap gap-2 day-pills">{% for n,label in [('0','Seg'),('1','Ter'),('2','Qua'),('3','Qui'),('4','Sex'),('5','Sáb'),('6','Dom')] %}<label><input type="checkbox" name="schedule_days" value="{{ n }}" {% if n in active_days %}checked{% endif %}><span>{{ label }}</span></label>{% endfor %}</div></div>
-            </div>
-            <div class="form-text mt-2">Fuso horário fixo: America/Sao_Paulo. Fora desse período, novos seguidores continuam entrando na fila.</div>
+          <div class="alert alert-info border-0 mb-4">
+            <div class="fw-semibold mb-1"><i class="bi bi-lightning-charge-fill me-1"></i> Modo rápido ativado</div>
+            <div class="small">O sistema verifica novos seguidores a cada <b>1 segundo</b> e envia assim que detectar. Entre mensagens consecutivas, o atraso interno fica entre <b>0 e 1 segundo</b>.</div>
           </div>
 
           <div class="mb-4">

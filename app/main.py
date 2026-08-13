@@ -139,22 +139,9 @@ def instagram_clear_session():
 @app.post("/config")
 @admin_required
 def config():
-    days = ",".join(request.form.getlist("schedule_days"))
     save_config(
         request.form.get("welcome_message", ""),
         request.form.get("welcome_enabled") == "on",
-        request.form.get("poll_seconds", "1"),
-        request.form.get("max_dms_per_hour", "12"),
-        request.form.get("min_dm_delay_seconds", "1"),
-        request.form.get("max_dms_per_day", "80"),
-        request.form.get("max_dm_delay_seconds", "2"),
-        request.form.get("max_retries", "3"),
-        request.form.get("alternate_enabled") == "on",
-        request.form.get("welcome_message_alt", ""),
-        request.form.get("schedule_enabled") == "on",
-        request.form.get("schedule_start", "09:00"),
-        request.form.get("schedule_end", "21:00"),
-        days or "0,1,2,3,4,5,6",
         request.form.get("excluded_usernames", ""),
     )
     flash("Configurações salvas.", "success")

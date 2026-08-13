@@ -172,19 +172,21 @@ def status():
         "last_poll": get_setting("last_poll", "Nunca"),
         "last_error": get_setting("last_error", ""),
         "welcome_enabled": _bool(get_setting("welcome_enabled", os.getenv("WELCOME_ENABLED", "false"))),
-        "poll_seconds": _int_setting("poll_seconds", os.getenv("POLL_SECONDS", "1"), 1, 3600),
-        "max_dms_per_hour": _int_setting("max_dms_per_hour", os.getenv("MAX_DMS_PER_HOUR", "12"), 1, 50),
-        "max_dms_per_day": _int_setting("max_dms_per_day", "80", 1, 500),
-        "min_dm_delay_seconds": _int_setting("min_dm_delay_seconds", os.getenv("MIN_DM_DELAY_SECONDS", "1"), 0, 600),
-        "max_dm_delay_seconds": _int_setting("max_dm_delay_seconds", "2", 0, 900),
-        "max_retries": _int_setting("max_retries", "3", 0, 10),
+        # Modo rápido fixo: o painel não expõe mais polling/limites/delays.
+        # O detector consulta a cada 1s e o remetente usa no máximo 1s entre DMs.
+        "poll_seconds": 1,
+        "max_dms_per_hour": 50,
+        "max_dms_per_day": 300,
+        "min_dm_delay_seconds": 0,
+        "max_dm_delay_seconds": 1,
+        "max_retries": 3,
         "welcome_message": get_setting("welcome_message", "Olá, {first_name}! 👋 Obrigado por seguir @{account}. Seja muito bem-vindo(a)!"),
-        "alternate_enabled": _bool(get_setting("alternate_enabled", "false")),
-        "welcome_message_alt": get_setting("welcome_message_alt", "Oi, {first_name}! 😊 Que bom ter você por aqui. Obrigado por seguir @{account}!"),
-        "schedule_enabled": _bool(get_setting("schedule_enabled", "false")),
-        "schedule_start": get_setting("schedule_start", "09:00"),
-        "schedule_end": get_setting("schedule_end", "21:00"),
-        "schedule_days": get_setting("schedule_days", "0,1,2,3,4,5,6"),
+        "alternate_enabled": False,
+        "welcome_message_alt": "",
+        "schedule_enabled": False,
+        "schedule_start": "00:00",
+        "schedule_end": "23:59",
+        "schedule_days": "0,1,2,3,4,5,6",
         "timezone": get_setting("timezone", "America/Sao_Paulo"),
         "excluded_usernames": get_setting("excluded_usernames", ""),
         "session_saved": os.path.exists(SESSION_FILE),
@@ -193,31 +195,29 @@ def status():
     }
 
 
-def save_config(message, enabled, poll_seconds, max_dms_per_hour, min_delay,
-                max_dms_per_day=80, max_delay=45, max_retries=3, alternate_enabled=False,
-                alternate_message="", schedule_enabled=False, schedule_start="09:00",
-                schedule_end="21:00", schedule_days="0,1,2,3,4,5,6", excluded_usernames=""):
-    min_delay_i = max(0, int(min_delay))
-    max_delay_i = max(min_delay_i, int(max_delay))
+def save_config(message, enabled, excluded_usernames=""):
+    """Salva apenas o que o operador precisa configurar.
+
+    Polling, delays, agenda, A/B e limites operacionais ficam internos para
+    evitar configurações conflitantes. O modo padrão é quase em tempo real.
+    """
     set_setting("welcome_message", message.strip())
     set_setting("welcome_enabled", str(bool(enabled)).lower())
-    set_setting("poll_seconds", max(1, min(3600, int(poll_seconds))))
-    set_setting("max_dms_per_hour", max(1, min(50, int(max_dms_per_hour))))
-    set_setting("max_dms_per_day", max(1, min(500, int(max_dms_per_day))))
-    set_setting("min_dm_delay_seconds", min_delay_i)
-    set_setting("max_dm_delay_seconds", min(900, max_delay_i))
-    set_setting("max_retries", max(0, min(10, int(max_retries))))
-    set_setting("alternate_enabled", str(bool(alternate_enabled)).lower())
-    set_setting("welcome_message_alt", alternate_message.strip())
-    set_setting("schedule_enabled", str(bool(schedule_enabled)).lower())
-    set_setting("schedule_start", schedule_start or "09:00")
-    set_setting("schedule_end", schedule_end or "21:00")
-    set_setting("schedule_days", schedule_days or "0,1,2,3,4,5,6")
-    set_setting("timezone", "America/Sao_Paulo")
     set_setting("excluded_usernames", excluded_usernames.strip())
-    log_event("INFO", "config_saved", "Configurações profissionais da automação salvas", {
-        "enabled": bool(enabled), "hourly_limit": max_dms_per_hour, "daily_limit": max_dms_per_day,
-        "schedule_enabled": bool(schedule_enabled), "alternate_enabled": bool(alternate_enabled),
+
+    # Neutraliza valores antigos que possam ter ficado persistidos no banco.
+    set_setting("poll_seconds", 1)
+    set_setting("min_dm_delay_seconds", 0)
+    set_setting("max_dm_delay_seconds", 1)
+    set_setting("alternate_enabled", "false")
+    set_setting("welcome_message_alt", "")
+    set_setting("schedule_enabled", "false")
+
+    log_event("INFO", "config_saved", "Configurações da automação salvas", {
+        "enabled": bool(enabled),
+        "mode": "near_realtime",
+        "poll_seconds": 1,
+        "dm_delay_seconds": "0-1",
     })
 
 
