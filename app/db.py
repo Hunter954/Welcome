@@ -44,6 +44,7 @@ def qmark(sql):
 def init_db():
     serial = "BIGSERIAL PRIMARY KEY" if _is_postgres() else "INTEGER PRIMARY KEY AUTOINCREMENT"
     booltype = "BOOLEAN" if _is_postgres() else "INTEGER"
+    bool_default = "FALSE" if _is_postgres() else "0"
     with conn() as c:
         cur = c.cursor()
 
@@ -66,7 +67,7 @@ def init_db():
                 username TEXT,
                 full_name TEXT,
                 first_seen TEXT NOT NULL,
-                welcomed {booltype} NOT NULL DEFAULT 0,
+                welcomed {booltype} NOT NULL DEFAULT {bool_default},
                 welcomed_at TEXT,
                 last_error TEXT
             )""")

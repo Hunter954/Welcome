@@ -10,7 +10,7 @@ from instagrapi import Client
 from instagrapi.exceptions import ChallengeRequired, LoginRequired, BadPassword, TwoFactorRequired
 
 from .crypto import decrypt, encrypt
-from .db import execute, get_setting, rows, set_setting, utcnow
+from .db import execute, get_setting, rows, set_setting, utcnow, _is_postgres
 
 DATA_DIR = os.getenv("DATA_DIR", os.path.join(os.getcwd(), "data"))
 Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
@@ -152,13 +152,14 @@ def sync_once(send_messages=True):
             pk = str(pk)
             if pk not in known:
                 execute("INSERT INTO followers(pk,username,full_name,first_seen,welcomed,last_error) VALUES(?,?,?,?,?,?)", (
-                    pk, user.username or "", user.full_name or "", utcnow(), 1 if baseline else 0, "baseline" if baseline else None
+                    pk, user.username or "", user.full_name or "", utcnow(), bool(baseline) if _is_postgres() else (1 if baseline else 0), "baseline" if baseline else None
                 ))
 
         sent = 0
         errors = 0
         if send_messages and cfg["welcome_enabled"] and not baseline:
-            pending = rows("SELECT pk,username,full_name FROM followers WHERE welcomed=0 ORDER BY first_seen ASC LIMIT 25")
+            pending_sql = "SELECT pk,username,full_name FROM followers WHERE welcomed=FALSE ORDER BY first_seen ASC LIMIT 25" if _is_postgres() else "SELECT pk,username,full_name FROM followers WHERE welcomed=0 ORDER BY first_seen ASC LIMIT 25"
+            pending = rows(pending_sql)
             for row in pending:
                 if _dm_count_last_hour() >= cfg["max_dms_per_hour"]:
                     break
@@ -173,7 +174,7 @@ def sync_once(send_messages=True):
                 msg = _render_message(cfg["welcome_message"], user, me.username)
                 try:
                     cl.direct_send(msg, user_ids=[int(row["pk"])])
-                    execute("UPDATE followers SET welcomed=1, welcomed_at=?, last_error=NULL WHERE pk=?", (utcnow(), row["pk"]))
+                    execute("UPDATE followers SET welcomed=?, welcomed_at=?, last_error=NULL WHERE pk=?", ((True if _is_postgres() else 1), utcnow(), row["pk"]))
                     execute("INSERT INTO dm_log(follower_pk,username,status,message,error,created_at) VALUES(?,?,?,?,?,?)", (row["pk"], row["username"], "sent", msg, None, utcnow()))
                     sent += 1
                     time.sleep(cfg["min_dm_delay_seconds"] + random.randint(0, 12))
