@@ -51,6 +51,9 @@ AIO_THREAD_LOCK = threading.Lock()
 CLIENT_LOCK = threading.RLock()
 client = None
 worker_started = False
+ROLE_CLIENTS = {}
+ROLE_CLIENTS_LOCK = threading.RLock()
+
 
 SENSITIVE_WORDS = (
     "password", "passwd", "authorization", "cookie", "sessionid", "csrftoken",
@@ -381,12 +384,14 @@ async def _login_async(username, password, verification_code=None):
         info = await cl.account_info()
         _safe_dump_settings(cl)
         set_setting("ig_username", username)
+        set_setting("ig_user_id", str(getattr(info, "pk", "")))
         set_setting("ig_password_enc", encrypt(password))
         set_setting("ig_sessionid_enc", "")
         set_setting("ig_auth_mode", "password")
         set_setting("ig_connected", "true")
         set_setting("last_error", "")
         client = cl
+        _invalidate_role_clients()
         log_event("INFO", "login_success", f"Conectado como @{info.username}", {
             "attempt_id": attempt_id, "instagram_user_id": str(getattr(info, "pk", "")),
         })
@@ -509,12 +514,14 @@ async def _import_browser_session_async(raw):
         info = await cl.account_info()
         _safe_dump_settings(cl)
         set_setting("ig_username", info.username or "")
+        set_setting("ig_user_id", str(getattr(info, "pk", "")))
         set_setting("ig_password_enc", "")
         set_setting("ig_sessionid_enc", encrypt(sessionid))
         set_setting("ig_auth_mode", "browser_session")
         set_setting("ig_connected", "true")
         set_setting("last_error", "")
         client = cl
+        _invalidate_role_clients()
         log_event("INFO", "browser_session_import_success", f"Sessão do navegador validada para @{info.username}", {
             "attempt_id": attempt_id,
             "instagram_user_id": str(getattr(info, "pk", "")),
@@ -539,6 +546,7 @@ def logout():
     global client
     with CLIENT_LOCK:
         client = None
+        _invalidate_role_clients()
         set_setting("ig_connected", "false")
         set_setting("ig_password_enc", "")
         set_setting("ig_sessionid_enc", "")
@@ -557,6 +565,7 @@ def clear_saved_session():
     global client
     with CLIENT_LOCK:
         client = None
+        _invalidate_role_clients()
         set_setting("ig_connected", "false")
         set_setting("ig_sessionid_enc", "")
         if get_setting("ig_auth_mode", "password") == "browser_session":
@@ -638,121 +647,222 @@ def _error_attempts_for(follower_pk):
     return int(r[0]["n"]) if r else 0
 
 
-async def _sync_once_async(send_messages=True):
-    cl = await _restore_client_async()
-    if not cl:
-        return {"ok": False, "message": "Instagram não conectado."}
-    cfg = status()
+def _invalidate_role_clients():
+    with ROLE_CLIENTS_LOCK:
+        ROLE_CLIENTS.clear()
+
+
+async def _role_client_async(role):
+    """Cria um Client independente por função para que polling, DMs e testes não se bloqueiem."""
+    with ROLE_CLIENTS_LOCK:
+        existing = ROLE_CLIENTS.get(role)
+    if existing is not None:
+        return existing
+
+    cl = await _new_client(load_saved_session=True)
+    session_loaded = getattr(cl, "_automation_session_loaded", False)
     try:
-        me = await cl.account_info()
-        followers = await cl.user_followers(str(me.pk), amount=0)
-        followers_by_id = {str(pk): user for pk, user in followers.items()}
-        current_ids = set(followers_by_id.keys())
-        known = {str(r["pk"]) for r in rows("SELECT pk FROM followers")}
-        new_ids = current_ids - known
-        baseline = len(known) == 0
-        for pk, user in followers_by_id.items():
-            if pk not in known:
-                execute(
-                    "INSERT INTO followers(pk,username,full_name,first_seen,welcomed,last_error) VALUES(?,?,?,?,?,?)",
-                    (pk, user.username or "", user.full_name or "", utcnow(), bool(baseline) if _is_postgres() else (1 if baseline else 0), "baseline" if baseline else None),
-                )
-        sent = 0
-        errors = 0
-        schedule_ok, schedule_reason = _schedule_allows(cfg)
-        if send_messages and cfg["welcome_enabled"] and not baseline and schedule_ok:
-            pending_sql = "SELECT pk,username,full_name FROM followers WHERE welcomed=FALSE ORDER BY first_seen ASC LIMIT 50" if _is_postgres() else "SELECT pk,username,full_name FROM followers WHERE welcomed=0 ORDER BY first_seen ASC LIMIT 50"
-            pending = rows(pending_sql)
-            excluded = _excluded_set(cfg.get("excluded_usernames", ""))
-            for row in pending:
-                username_norm = (row.get("username") or "").lower().lstrip("@")
-                if username_norm in excluded:
-                    execute("UPDATE followers SET welcomed=?, welcomed_at=?, last_error=? WHERE pk=?", ((True if _is_postgres() else 1), utcnow(), "excluded_by_rule", str(row["pk"])))
-                    log_event("INFO", "follower_excluded", f"@{username_norm} ignorado pela lista de exclusão")
-                    continue
-                if _error_attempts_for(row["pk"]) >= cfg["max_retries"] and cfg["max_retries"] > 0:
-                    continue
-                if _dm_count_last_hour() >= cfg["max_dms_per_hour"]:
-                    log_event("INFO", "hourly_limit_reached", "Limite de DMs por hora atingido", {"limit": cfg["max_dms_per_hour"]})
-                    break
-                if _dm_count_today(cfg.get("timezone")) >= cfg["max_dms_per_day"]:
-                    log_event("INFO", "daily_limit_reached", "Limite diário de DMs atingido", {"limit": cfg["max_dms_per_day"]})
-                    break
-                follower_pk = str(row["pk"])
-                user = followers_by_id.get(follower_pk)
-                if not user:
-                    try:
-                        user = await cl.user_info(follower_pk)
-                    except Exception as e:
-                        execute("UPDATE followers SET last_error=? WHERE pk=?", (str(e), follower_pk))
-                        errors += 1
-                        continue
-                template, variant = _choose_template(cfg)
-                msg = _render_message(template, user, me.username)
-                try:
-                    await cl.direct_send(msg, user_ids=[int(follower_pk)])
-                    execute("UPDATE followers SET welcomed=?, welcomed_at=?, last_error=NULL WHERE pk=?", ((True if _is_postgres() else 1), utcnow(), follower_pk))
-                    execute("INSERT INTO dm_log(follower_pk,username,status,message,error,created_at) VALUES(?,?,?,?,?,?)", (follower_pk, row["username"], "sent", msg, None, utcnow()))
-                    sent += 1
-                    log_event("INFO", "dm_sent", f"Boas-vindas enviada para @{row['username']}", {"variant": variant})
-                    delay = random.randint(cfg["min_dm_delay_seconds"], cfg["max_dm_delay_seconds"])
-                    if delay > 0:
-                        await asyncio.sleep(delay)
-                except Exception as e:
-                    error_text = f"{type(e).__name__}: {e}"
-                    execute("UPDATE followers SET last_error=? WHERE pk=?", (error_text, follower_pk))
-                    execute("INSERT INTO dm_log(follower_pk,username,status,message,error,created_at) VALUES(?,?,?,?,?,?)", (follower_pk, row["username"], "error", msg, error_text, utcnow()))
-                    log_event("ERROR", "dm_send_failed", error_text, {"username": row["username"], "exception_type": type(e).__name__})
-                    errors += 1
-                    if isinstance(e, LoginRequired):
-                        set_setting("ig_connected", "false")
-                        break
-        if send_messages and cfg["welcome_enabled"] and not baseline and not schedule_ok:
-            log_event("INFO", "schedule_paused", "Envios pausados pela agenda; novos seguidores continuam entrando na fila", {"reason": schedule_reason})
+        if session_loaded:
+            info = await cl.account_info()
+        else:
+            enc_sessionid = get_setting("ig_sessionid_enc")
+            enc_password = get_setting("ig_password_enc")
+            username = get_setting("ig_username")
+            if enc_sessionid:
+                await cl.login_by_sessionid(decrypt(enc_sessionid))
+            elif enc_password and username:
+                await cl.login(username, decrypt(enc_password))
+            else:
+                raise LoginRequired("Nenhuma sessão disponível")
+            info = await cl.account_info()
+        set_setting("ig_user_id", str(getattr(info, "pk", "")))
+        set_setting("ig_username", getattr(info, "username", "") or get_setting("ig_username", ""))
+        with ROLE_CLIENTS_LOCK:
+            ROLE_CLIENTS[role] = cl
+        log_event("INFO", "role_client_ready", f"Cliente independente pronto: {role}", {"role": role})
+        return cl
+    except Exception:
+        with ROLE_CLIENTS_LOCK:
+            ROLE_CLIENTS.pop(role, None)
+        raise
+
+
+def _upsert_detected_followers(followers, baseline=False):
+    known = {str(r["pk"]) for r in rows("SELECT pk FROM followers")}
+    new_count = 0
+    for pk, user in followers.items():
+        pk = str(pk)
+        if pk in known:
+            continue
+        execute(
+            "INSERT INTO followers(pk,username,full_name,first_seen,welcomed,last_error) VALUES(?,?,?,?,?,?)",
+            (
+                pk,
+                user.username or "",
+                user.full_name or "",
+                utcnow(),
+                bool(baseline) if _is_postgres() else (1 if baseline else 0),
+                "baseline" if baseline else None,
+            ),
+        )
+        if not baseline:
+            new_count += 1
+            log_event("INFO", "new_follower_detected", f"Novo seguidor detectado: @{user.username}", {"pk": pk})
+    return new_count
+
+
+async def _detect_followers_async(force_full=False):
+    """Polling rápido: após a base, busca somente os 50 seguidores mais recentes, ordenados por data."""
+    try:
+        cl = await _role_client_async("detector")
+        me_id = get_setting("ig_user_id", "")
+        if not me_id:
+            me = await cl.account_info()
+            me_id = str(me.pk)
+            set_setting("ig_user_id", me_id)
+
+        known_count = int(rows("SELECT COUNT(*) AS n FROM followers")[0]["n"])
+        baseline = known_count == 0
+        amount = 0 if baseline or force_full else 50
+        t0 = datetime.now(timezone.utc)
+        followers = await cl.user_followers(
+            str(me_id),
+            amount=amount,
+            order="date_followed_latest",
+            use_cache=False,
+        )
+        elapsed = (datetime.now(timezone.utc) - t0).total_seconds()
+        new_count = _upsert_detected_followers(followers, baseline=baseline)
         set_setting("last_poll", utcnow())
         set_setting("last_error", "")
-        log_event("INFO", "sync_completed", "Sincronização concluída", {"new": 0 if baseline else len(new_ids), "sent": sent, "errors": errors, "baseline": baseline, "total": len(followers_by_id), "schedule": schedule_reason})
-        return {"ok": True, "new": 0 if baseline else len(new_ids), "sent": sent, "errors": errors, "baseline": baseline, "total": len(followers_by_id)}
+        log_event("INFO", "followers_polled", "Consulta de seguidores concluída", {
+            "mode": "baseline_full" if baseline else "latest_50",
+            "returned": len(followers),
+            "new": 0 if baseline else new_count,
+            "seconds": round(elapsed, 3),
+        })
+        return {"ok": True, "new": 0 if baseline else new_count, "baseline": baseline, "total": len(followers)}
     except Exception as e:
         set_setting("last_poll", utcnow())
-        set_setting("last_error", f"{type(e).__name__}: {e}")
-        if isinstance(e, LoginRequired):
-            set_setting("ig_connected", "false")
-        log_event("ERROR", "sync_failed", f"{type(e).__name__}: {e}", _exception_details(e, cl))
+        set_setting("last_error", f"Detector: {type(e).__name__}: {e}")
+        with ROLE_CLIENTS_LOCK:
+            ROLE_CLIENTS.pop("detector", None)
+        log_event("ERROR", "follower_poll_failed", f"{type(e).__name__}: {e}")
         return {"ok": False, "message": f"{type(e).__name__}: {e}"}
 
 
+async def _send_one_pending_async():
+    cfg = status()
+    if not cfg["welcome_enabled"]:
+        return {"ok": True, "sent": 0, "reason": "disabled"}
+    schedule_ok, schedule_reason = _schedule_allows(cfg)
+    if not schedule_ok:
+        return {"ok": True, "sent": 0, "reason": schedule_reason}
+    if _dm_count_last_hour() >= cfg["max_dms_per_hour"]:
+        return {"ok": True, "sent": 0, "reason": "hourly_limit"}
+    if _dm_count_today(cfg.get("timezone")) >= cfg["max_dms_per_day"]:
+        return {"ok": True, "sent": 0, "reason": "daily_limit"}
+
+    pending_sql = "SELECT pk,username,full_name FROM followers WHERE welcomed=FALSE ORDER BY first_seen ASC LIMIT 1" if _is_postgres() else "SELECT pk,username,full_name FROM followers WHERE welcomed=0 ORDER BY first_seen ASC LIMIT 1"
+    pending = rows(pending_sql)
+    if not pending:
+        return {"ok": True, "sent": 0, "reason": "empty"}
+    row = pending[0]
+    username_norm = (row.get("username") or "").lower().lstrip("@")
+    if username_norm in _excluded_set(cfg.get("excluded_usernames", "")):
+        execute("UPDATE followers SET welcomed=?, welcomed_at=?, last_error=? WHERE pk=?", ((True if _is_postgres() else 1), utcnow(), "excluded_by_rule", str(row["pk"])))
+        return {"ok": True, "sent": 0, "reason": "excluded"}
+    if _error_attempts_for(row["pk"]) >= cfg["max_retries"] and cfg["max_retries"] > 0:
+        return {"ok": True, "sent": 0, "reason": "max_retries"}
+
+    cl = await _role_client_async("sender")
+    from types import SimpleNamespace
+    user = SimpleNamespace(username=row.get("username") or "", full_name=row.get("full_name") or "")
+    template, variant = _choose_template(cfg)
+    msg = _render_message(template, user, get_setting("ig_username", ""))
+    follower_pk = str(row["pk"])
+    t0 = datetime.now(timezone.utc)
+    try:
+        await cl.direct_send(msg, user_ids=[int(follower_pk)])
+        elapsed = (datetime.now(timezone.utc) - t0).total_seconds()
+        execute("UPDATE followers SET welcomed=?, welcomed_at=?, last_error=NULL WHERE pk=?", ((True if _is_postgres() else 1), utcnow(), follower_pk))
+        execute("INSERT INTO dm_log(follower_pk,username,status,message,error,created_at) VALUES(?,?,?,?,?,?)", (follower_pk, row["username"], "sent", msg, None, utcnow()))
+        log_event("INFO", "dm_sent", f"Boas-vindas enviada para @{row['username']}", {"variant": variant, "seconds": round(elapsed, 3)})
+        return {"ok": True, "sent": 1, "seconds": elapsed}
+    except Exception as e:
+        error_text = f"{type(e).__name__}: {e}"
+        execute("UPDATE followers SET last_error=? WHERE pk=?", (error_text, follower_pk))
+        execute("INSERT INTO dm_log(follower_pk,username,status,message,error,created_at) VALUES(?,?,?,?,?,?)", (follower_pk, row["username"], "error", msg, error_text, utcnow()))
+        with ROLE_CLIENTS_LOCK:
+            ROLE_CLIENTS.pop("sender", None)
+        log_event("ERROR", "dm_send_failed", error_text, {"username": row["username"]})
+        return {"ok": False, "sent": 0, "message": error_text}
+
+
+async def _sync_once_async(send_messages=True):
+    detected = await _detect_followers_async()
+    if not detected.get("ok"):
+        return detected
+    sent = 0
+    errors = 0
+    if send_messages and not detected.get("baseline"):
+        # Drena algumas pendências sem fazer nova consulta completa de seguidores.
+        for _ in range(10):
+            result = await _send_one_pending_async()
+            if not result.get("ok"):
+                errors += 1
+                break
+            if not result.get("sent"):
+                break
+            sent += 1
+            cfg = status()
+            delay = random.randint(cfg["min_dm_delay_seconds"], cfg["max_dm_delay_seconds"])
+            if delay > 0:
+                await asyncio.sleep(delay)
+    return {**detected, "sent": sent, "errors": errors}
+
+
 def sync_once(send_messages=True):
-    with CLIENT_LOCK:
-        return _run_async(_sync_once_async(send_messages=send_messages), timeout=900)
+    return _run_async(_sync_once_async(send_messages=send_messages), timeout=900)
 
 
 async def _send_test_dm_async(username, custom_message=None):
-    cl = await _restore_client_async()
-    if not cl:
-        return False, "Instagram não conectado."
     username = (username or "").strip().lstrip("@")
     if not username:
         return False, "Informe um @usuário para o teste."
     try:
+        cl = await _role_client_async("test")
         pk = await cl.user_id_from_username(username)
         user = await cl.user_info(pk)
-        me = await cl.account_info()
         template = (custom_message or status()["welcome_message"]).strip()
-        msg = _render_message(template, user, me.username)
+        msg = _render_message(template, user, get_setting("ig_username", ""))
+        t0 = datetime.now(timezone.utc)
         await cl.direct_send(msg, user_ids=[int(pk)])
+        elapsed = (datetime.now(timezone.utc) - t0).total_seconds()
         execute("INSERT INTO dm_log(follower_pk,username,status,message,error,created_at) VALUES(?,?,?,?,?,?)", (str(pk), username, "test", msg, None, utcnow()))
-        log_event("INFO", "test_dm_sent", f"DM de teste enviada para @{username}")
+        log_event("INFO", "test_dm_sent", f"DM de teste enviada para @{username}", {"seconds": round(elapsed, 3)})
         return True, f"DM de teste enviada para @{username}."
     except Exception as e:
+        with ROLE_CLIENTS_LOCK:
+            ROLE_CLIENTS.pop("test", None)
         msg = f"Falha no teste: {type(e).__name__}: {e}"
-        log_event("ERROR", "test_dm_failed", msg, _exception_details(e, cl, username=username))
+        log_event("ERROR", "test_dm_failed", msg, {"username": username})
         return False, msg
 
 
+def _test_dm_background(username, custom_message=None):
+    try:
+        _run_async(_send_test_dm_async(username, custom_message), timeout=180)
+    except Exception as e:
+        log_event("ERROR", "test_dm_background_failed", f"{type(e).__name__}: {e}")
+
+
 def send_test_dm(username, custom_message=None):
-    with CLIENT_LOCK:
-        return _run_async(_send_test_dm_async(username, custom_message), timeout=180)
+    username = (username or "").strip().lstrip("@")
+    if not username:
+        return False, "Informe um @usuário para o teste."
+    threading.Thread(target=_test_dm_background, args=(username, custom_message), daemon=True, name="instagram-test-dm").start()
+    return True, f"Teste para @{username} colocado na fila. O painel não ficará travado enquanto envia."
 
 
 def mark_pending_as_baseline():
@@ -766,17 +876,33 @@ def mark_pending_as_baseline():
     return count
 
 
-def worker_loop():
-    log_event("INFO", "worker_started", "Worker de sincronização iniciado", {"mode": "near_realtime", "poll_seconds": status()["poll_seconds"]})
+def detector_loop():
+    log_event("INFO", "detector_started", "Detector rápido de novos seguidores iniciado", {"mode": "latest_50"})
     while True:
         try:
             if status()["connected"]:
-                sync_once(send_messages=True)
+                _run_async(_detect_followers_async(), timeout=120)
         except Exception as e:
-            set_setting("last_error", f"Worker: {type(e).__name__}: {e}")
-            log_event("ERROR", "worker_error", f"{type(e).__name__}: {e}")
+            log_event("ERROR", "detector_loop_error", f"{type(e).__name__}: {e}")
         import time
         time.sleep(max(1, status()["poll_seconds"]))
+
+
+def sender_loop():
+    log_event("INFO", "sender_started", "Remetente de DMs iniciado separadamente do detector")
+    import time
+    while True:
+        try:
+            if status()["connected"] and status()["welcome_enabled"]:
+                result = _run_async(_send_one_pending_async(), timeout=180)
+                if result.get("sent"):
+                    cfg = status()
+                    delay = random.randint(cfg["min_dm_delay_seconds"], cfg["max_dm_delay_seconds"])
+                    time.sleep(max(0, delay))
+                    continue
+        except Exception as e:
+            log_event("ERROR", "sender_loop_error", f"{type(e).__name__}: {e}")
+        time.sleep(0.25)
 
 
 def start_worker():
@@ -784,5 +910,6 @@ def start_worker():
     if worker_started:
         return
     worker_started = True
-    t = threading.Thread(target=worker_loop, daemon=True, name="instagram-worker")
-    t.start()
+    threading.Thread(target=detector_loop, daemon=True, name="instagram-detector").start()
+    threading.Thread(target=sender_loop, daemon=True, name="instagram-sender").start()
+
