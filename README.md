@@ -1,12 +1,12 @@
 # Instagram Welcome Automation
 
-Painel web em Flask + instagrapi para detectar seguidores novos e enviar uma DM de boas-vindas.
+Painel web em Flask + aiograpi para detectar seguidores novos e enviar uma DM de boas-vindas.
 
 ## Como funciona
 
 1. Você entra no painel administrativo.
 2. Conecta a conta do Instagram com usuário/senha e, se necessário, 2FA.
-3. O sistema salva/reutiliza a sessão do instagrapi.
+3. O sistema salva/reutiliza a sessão do aiograpi.
 4. Na primeira sincronização, todos os seguidores atuais viram a **base inicial** e não recebem mensagem.
 5. Nas sincronizações seguintes, IDs novos entram na fila e recebem a mensagem configurada.
 6. Há limite de DMs por hora e intervalo mínimo entre envios.
@@ -58,7 +58,7 @@ flask --app app.main run --debug
 
 ## Observações importantes
 
-- `instagrapi` é uma API privada/não oficial. Mudanças do Instagram podem quebrar login, seguidores ou Direct.
+- `aiograpi` é uma API privada/não oficial e assíncrona. Mudanças do Instagram podem quebrar login, seguidores ou Direct.
 - Use sessão persistente e evite trocar de IP/região constantemente.
 - Se aparecer challenge, abra o app oficial do Instagram, aprove o login e depois tente reconectar.
 - Comece com limites conservadores. Não use esta base para spam, listas compradas ou DMs em massa.
