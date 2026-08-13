@@ -1,165 +1,187 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="container py-4">
-  <div class="row g-4">
-    <div class="col-lg-5">
-      <div class="card shadow-sm h-100">
-        <div class="card-body">
-          <h4>Conta do Instagram</h4>
+<div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-4">
+  <div>
+    <h2 class="mb-1">Central da Automação</h2>
+    <p class="text-secondary mb-0">Boas-vindas automáticas, fila, limites e diagnóstico em um só lugar.</p>
+  </div>
+  <form method="post" action="{{ url_for('sync') }}">
+    <button class="btn btn-dark"><i class="bi bi-arrow-repeat me-2"></i>Sincronizar agora</button>
+  </form>
+</div>
 
-          {% if cfg.connected %}
-            <div class="alert alert-success">
-              <b>Conectado:</b> @{{ cfg.username }}
-            </div>
-            <div class="d-flex gap-2 flex-wrap">
-              <form method="post" action="{{ url_for('instagram_disconnect') }}">
-                <button class="btn btn-outline-danger">Desconectar</button>
-              </form>
-              <form method="post" action="{{ url_for('instagram_clear_session') }}" onsubmit="return confirm('Apagar a sessão salva do Instagram e exigir um login limpo?');">
-                <button class="btn btn-outline-secondary">Limpar sessão salva</button>
-              </form>
-            </div>
-          {% else %}
-            <div class="alert alert-warning">Nenhuma conta conectada.</div>
+<div class="row g-3 mb-4">
+  <div class="col-6 col-lg-3"><div class="metric"><small>Seguidores monitorados</small><strong>{{ counts.followers }}</strong></div></div>
+  <div class="col-6 col-lg-3"><div class="metric"><small>Boas-vindas concluídas</small><strong>{{ counts.welcomed }}</strong></div></div>
+  <div class="col-6 col-lg-3"><div class="metric"><small>Na fila</small><strong>{{ counts.pending }}</strong></div></div>
+  <div class="col-6 col-lg-3"><div class="metric"><small>Erros registrados</small><strong>{{ counts.errors }}</strong></div></div>
+</div>
 
-            <form method="post" action="{{ url_for('instagram_login') }}">
-              <div class="mb-3">
-                <label class="form-label">Usuário</label>
-                <input class="form-control" name="username" required autocomplete="username">
-              </div>
-              <div class="mb-3">
-                <label class="form-label">Senha</label>
-                <input class="form-control" type="password" name="password" required autocomplete="current-password">
-              </div>
-              <button class="btn btn-dark w-100">Conectar Instagram</button>
-            </form>
-
-            <div class="d-flex align-items-center gap-2 my-3">
-              <hr class="flex-grow-1 m-0">
-              <span class="text-secondary small">ou</span>
-              <hr class="flex-grow-1 m-0">
-            </div>
-
-            <details class="border rounded p-3">
-              <summary class="fw-semibold" style="cursor:pointer">
-                <i class="bi bi-browser-chrome me-1"></i> Importar sessão do Chrome
-              </summary>
-              <div class="mt-3">
-                <p class="small text-secondary mb-2">
-                  Se você já está logado em <b>instagram.com</b> no Chrome, cole aqui o valor do cookie <code>sessionid</code>, um Cookie header ou um JSON exportado. O sistema extrai somente o <code>sessionid</code>, valida no Instagram e salva a sessão criptografada.
-                </p>
-
-                <form method="post" action="{{ url_for('instagram_import_session') }}" enctype="multipart/form-data">
-                  <div class="mb-2">
-                    <label class="form-label small">Sessionid / cookies exportados</label>
-                    <textarea class="form-control font-monospace" rows="4" name="session_data" placeholder="Cole somente o sessionid ou o JSON de cookies do instagram.com"></textarea>
-                  </div>
-                  <div class="mb-3">
-                    <label class="form-label small">Ou envie um arquivo .json/.txt</label>
-                    <input class="form-control" type="file" name="session_file" accept=".json,.txt,text/plain,application/json">
-                  </div>
-                  <div class="alert alert-light border small py-2">
-                    <b>Privacidade:</b> o conteúdo colado não aparece nos logs. Tokens/cookies são mascarados e o sessionid é armazenado criptografado.
-                  </div>
-                  <button class="btn btn-outline-primary w-100">
-                    <i class="bi bi-shield-check me-1"></i>Validar e importar sessão
-                  </button>
-                </form>
-              </div>
-            </details>
-          {% endif %}
-
-          {% if request.args.get('twofa') %}
-            <hr>
-            <form method="post" action="{{ url_for('instagram_2fa') }}">
-              <label class="form-label">Código 2FA</label>
-              <div class="input-group">
-                <input class="form-control" name="verification_code" required inputmode="numeric">
-                <button class="btn btn-dark">Validar</button>
-              </div>
-            </form>
-          {% endif %}
-
-          <hr>
-          <div class="small text-secondary mb-2">
-            <b>Modo de autenticação:</b>
-            {% if cfg.auth_mode == 'browser_session' %}
-              Sessão do navegador
-            {% else %}
-              Usuário/senha
-            {% endif %}
-            <br>
-
-            <b>Sessão persistente:</b>
-            {% if cfg.session_saved %}
-              <span class="text-success">salva</span>
-            {% else %}
-              <span class="text-warning">ainda não criada</span>
-            {% endif %}
-            <br>
-
-            <b>IP estável/proxy:</b>
-            {% if cfg.proxy_configured %}
-              <span class="text-success">configurado</span>
-            {% else %}
-              <span class="text-secondary">não configurado</span>
-            {% endif %}
-          </div>
-
-          <small class="text-secondary">
-            Última verificação: {{ cfg.last_poll }}<br>
-            {% if cfg.last_error %}
-              <span class="text-danger">{{ cfg.last_error }}</span>
-            {% endif %}
-          </small>
+<div class="row g-4 mb-4">
+  <div class="col-xl-4">
+    <div class="card shadow-sm h-100">
+      <div class="card-body p-4">
+        <div class="d-flex align-items-center justify-content-between mb-3">
+          <h4 class="mb-0">Conta do Instagram</h4>
+          {% if cfg.connected %}<span class="badge text-bg-success">ONLINE</span>{% else %}<span class="badge text-bg-warning">DESCONECTADO</span>{% endif %}
         </div>
+
+        {% if cfg.connected %}
+          <div class="account-box mb-3"><div class="avatar-mini"><i class="bi bi-instagram"></i></div><div><div class="fw-bold">@{{ cfg.username }}</div><small class="text-secondary">Sessão validada</small></div></div>
+          <div class="d-grid gap-2">
+            <form method="post" action="{{ url_for('instagram_disconnect') }}"><button class="btn btn-outline-danger w-100">Desconectar conta</button></form>
+            <form method="post" action="{{ url_for('instagram_clear_session') }}" onsubmit="return confirm('Apagar a sessão salva do Instagram?');"><button class="btn btn-outline-secondary w-100">Limpar sessão persistente</button></form>
+          </div>
+        {% else %}
+          <div class="alert alert-warning small">Nenhuma conta conectada. Recomendado: importar a sessão do Chrome.</div>
+          <form method="post" action="{{ url_for('instagram_login') }}">
+            <div class="mb-2"><label class="form-label">Usuário</label><input class="form-control" name="username" autocomplete="username" required></div>
+            <div class="mb-3"><label class="form-label">Senha</label><input class="form-control" type="password" name="password" autocomplete="current-password" required></div>
+            <button class="btn btn-dark w-100">Conectar com senha</button>
+          </form>
+          <div class="text-center text-secondary small my-3">ou</div>
+          <details class="border rounded-4 p-3" open>
+            <summary class="fw-semibold"><i class="bi bi-browser-chrome me-2"></i>Importar sessão do Chrome</summary>
+            <form method="post" action="{{ url_for('instagram_import_session') }}" enctype="multipart/form-data" class="mt-3">
+              <textarea class="form-control font-monospace mb-2" rows="3" name="session_data" placeholder="Cole o valor do sessionid"></textarea>
+              <input class="form-control mb-3" type="file" name="session_file" accept=".json,.txt,text/plain,application/json">
+              <button class="btn btn-outline-primary w-100">Validar e importar</button>
+            </form>
+          </details>
+        {% endif %}
+
+        {% if request.args.get('twofa') %}
+          <hr><form method="post" action="{{ url_for('instagram_2fa') }}"><label class="form-label">Código 2FA</label><div class="input-group"><input class="form-control" name="verification_code" required inputmode="numeric"><button class="btn btn-dark">Validar</button></div></form>
+        {% endif %}
+
+        <hr>
+        <div class="status-list small">
+          <div><span>Autenticação</span><b>{{ 'Sessão do navegador' if cfg.auth_mode == 'browser_session' else 'Usuário/senha' }}</b></div>
+          <div><span>Sessão persistente</span><b class="{{ 'text-success' if cfg.session_saved else 'text-warning' }}">{{ 'Salva' if cfg.session_saved else 'Não criada' }}</b></div>
+          <div><span>Proxy/IP estável</span><b>{{ 'Configurado' if cfg.proxy_configured else 'Não configurado' }}</b></div>
+          <div><span>Última sincronização</span><b>{{ cfg.last_poll }}</b></div>
+        </div>
+        {% if cfg.last_error %}<div class="alert alert-danger small mt-3 mb-0">{{ cfg.last_error }}</div>{% endif %}
       </div>
     </div>
+  </div>
 
-    <div class="col-lg-7">
-      <div class="card shadow-sm mb-4">
-        <div class="card-body">
-          <h4>Diagnóstico do Instagram</h4>
-          {% if diagnostic_logs %}
-            <div class="table-responsive">
-              <table class="table table-sm align-middle">
-                <thead>
-                  <tr><th>Data</th><th>Nível</th><th>Evento</th><th>Mensagem / detalhes</th></tr>
-                </thead>
-                <tbody>
-                {% for item in diagnostic_logs %}
-                  <tr>
-                    <td class="small text-nowrap">{{ item.created_at }}</td>
-                    <td><span class="badge {% if item.level == 'ERROR' %}text-bg-danger{% elif item.level == 'WARNING' %}text-bg-warning{% else %}text-bg-secondary{% endif %}">{{ item.level }}</span></td>
-                    <td><code>{{ item.event }}</code></td>
-                    <td>
-                      {{ item.message }}
-                      {% if item.details %}
-                        <details class="mt-1"><summary class="small">ver detalhes técnicos</summary><pre class="small mt-2 mb-0 text-wrap">{{ item.details }}</pre></details>
-                      {% endif %}
-                    </td>
-                  </tr>
-                {% endfor %}
-                </tbody>
-              </table>
-            </div>
-          {% else %}
-            <p class="text-secondary mb-0">Ainda não há eventos de diagnóstico.</p>
-          {% endif %}
+  <div class="col-xl-8">
+    <div class="card shadow-sm h-100">
+      <div class="card-body p-4">
+        <div class="d-flex flex-wrap justify-content-between gap-2 align-items-center mb-4">
+          <div><h4 class="mb-1">Automação de boas-vindas</h4><small class="text-secondary">Novos seguidores entram na fila; os controles abaixo decidem quando e como enviar.</small></div>
+          <span class="badge rounded-pill {{ 'text-bg-success' if cfg.welcome_enabled else 'text-bg-secondary' }} fs-6">{{ 'ATIVA' if cfg.welcome_enabled else 'PAUSADA' }}</span>
         </div>
-      </div>
 
-      <div class="card shadow-sm">
-        <div class="card-body">
-          <h4>Resumo</h4>
-          <div class="row g-3">
-            <div class="col-md-4"><div class="border rounded p-3"><div class="small text-secondary">Seguidores</div><div class="fs-4 fw-bold">{{ counts.followers if counts else 0 }}</div></div></div>
-            <div class="col-md-4"><div class="border rounded p-3"><div class="small text-secondary">Boas-vindas</div><div class="fs-4 fw-bold">{{ counts.welcomed if counts else 0 }}</div></div></div>
-            <div class="col-md-4"><div class="border rounded p-3"><div class="small text-secondary">Pendentes</div><div class="fs-4 fw-bold">{{ counts.pending if counts else 0 }}</div></div></div>
+        <form method="post" action="{{ url_for('config') }}">
+          <div class="form-check form-switch automation-switch mb-4">
+            <input class="form-check-input" type="checkbox" role="switch" id="welcome_enabled" name="welcome_enabled" {% if cfg.welcome_enabled %}checked{% endif %}>
+            <label class="form-check-label fw-semibold" for="welcome_enabled">Enviar boas-vindas automaticamente</label>
+          </div>
+
+          <label class="form-label fw-semibold">Mensagem principal <span class="badge text-bg-light">Variante A</span></label>
+          <textarea class="form-control mb-2" rows="5" id="welcome_message" name="welcome_message" required>{{ cfg.welcome_message }}</textarea>
+          <div class="small text-secondary mb-3">Variáveis: <code>{first_name}</code> <code>{username}</code> <code>{account}</code></div>
+
+          <div class="border rounded-4 p-3 mb-4 bg-body-tertiary">
+            <div class="form-check form-switch mb-2">
+              <input class="form-check-input" type="checkbox" id="alternate_enabled" name="alternate_enabled" {% if cfg.alternate_enabled %}checked{% endif %}>
+              <label class="form-check-label fw-semibold" for="alternate_enabled">Teste A/B de mensagem</label>
+            </div>
+            <small class="text-secondary d-block mb-2">Quando ativo, alterna aproximadamente 50/50 entre A e B.</small>
+            <textarea class="form-control" rows="4" name="welcome_message_alt" placeholder="Mensagem variante B">{{ cfg.welcome_message_alt }}</textarea>
+          </div>
+
+          <div class="row g-3 mb-4">
+            <div class="col-md-4"><label class="form-label">Verificar a cada</label><div class="input-group"><input class="form-control" type="number" min="60" max="3600" name="poll_seconds" value="{{ cfg.poll_seconds }}"><span class="input-group-text">seg</span></div></div>
+            <div class="col-md-4"><label class="form-label">Máx. por hora</label><input class="form-control" type="number" min="1" max="50" name="max_dms_per_hour" value="{{ cfg.max_dms_per_hour }}"></div>
+            <div class="col-md-4"><label class="form-label">Máx. por dia</label><input class="form-control" type="number" min="1" max="500" name="max_dms_per_day" value="{{ cfg.max_dms_per_day }}"></div>
+            <div class="col-md-4"><label class="form-label">Delay mínimo</label><div class="input-group"><input class="form-control" type="number" min="10" name="min_dm_delay_seconds" value="{{ cfg.min_dm_delay_seconds }}"><span class="input-group-text">seg</span></div></div>
+            <div class="col-md-4"><label class="form-label">Delay máximo</label><div class="input-group"><input class="form-control" type="number" min="10" name="max_dm_delay_seconds" value="{{ cfg.max_dm_delay_seconds }}"><span class="input-group-text">seg</span></div></div>
+            <div class="col-md-4"><label class="form-label">Tentativas por pessoa</label><input class="form-control" type="number" min="0" max="10" name="max_retries" value="{{ cfg.max_retries }}"><div class="form-text">0 = sem limite</div></div>
+          </div>
+
+          <div class="border rounded-4 p-3 mb-4">
+            <div class="form-check form-switch mb-3">
+              <input class="form-check-input" type="checkbox" id="schedule_enabled" name="schedule_enabled" {% if cfg.schedule_enabled %}checked{% endif %}>
+              <label class="form-check-label fw-semibold" for="schedule_enabled">Usar horário de funcionamento</label>
+            </div>
+            <div class="row g-3 align-items-end">
+              <div class="col-sm-6 col-md-3"><label class="form-label">Início</label><input class="form-control" type="time" name="schedule_start" value="{{ cfg.schedule_start }}"></div>
+              <div class="col-sm-6 col-md-3"><label class="form-label">Fim</label><input class="form-control" type="time" name="schedule_end" value="{{ cfg.schedule_end }}"></div>
+              <div class="col-md-6"><label class="form-label d-block">Dias</label>{% set active_days = cfg.schedule_days.split(',') %}<div class="d-flex flex-wrap gap-2 day-pills">{% for n,label in [('0','Seg'),('1','Ter'),('2','Qua'),('3','Qui'),('4','Sex'),('5','Sáb'),('6','Dom')] %}<label><input type="checkbox" name="schedule_days" value="{{ n }}" {% if n in active_days %}checked{% endif %}><span>{{ label }}</span></label>{% endfor %}</div></div>
+            </div>
+            <div class="form-text mt-2">Fuso horário fixo: America/Sao_Paulo. Fora desse período, novos seguidores continuam entrando na fila.</div>
+          </div>
+
+          <div class="mb-4">
+            <label class="form-label fw-semibold">Lista de exclusão</label>
+            <textarea class="form-control" rows="2" name="excluded_usernames" placeholder="@usuario1, @usuario2">{{ cfg.excluded_usernames }}</textarea>
+            <div class="form-text">Esses perfis serão registrados, mas não receberão a mensagem automática.</div>
+          </div>
+
+          <div class="d-flex flex-wrap gap-2">
+            <button class="btn btn-primary px-4"><i class="bi bi-check2-circle me-2"></i>Salvar automação</button>
+          </div>
+        </form>
+
+        {% if cfg.connected %}
+        <hr class="my-4">
+        <div class="row g-3 align-items-end">
+          <div class="col-md-8">
+            <h5 class="mb-1">Enviar DM de teste</h5><small class="text-secondary">Testa a mensagem principal sem alterar a fila.</small>
+            <form method="post" action="{{ url_for('instagram_test_dm') }}" class="row g-2 mt-1">
+              <div class="col-sm-5"><input class="form-control" name="test_username" placeholder="@usuario" required></div>
+              <div class="col-sm-7"><button class="btn btn-outline-dark w-100"><i class="bi bi-send me-2"></i>Enviar mensagem de teste</button></div>
+            </form>
+          </div>
+          <div class="col-md-4">
+            <div class="preview-box"><small>Prévia rápida</small><div id="messagePreview" class="mt-2">{{ cfg.welcome_message }}</div></div>
           </div>
         </div>
+        {% endif %}
       </div>
     </div>
   </div>
 </div>
+
+<div class="row g-4 mb-4">
+  <div class="col-xl-6">
+    <div class="card shadow-sm h-100"><div class="card-body p-4">
+      <div class="d-flex justify-content-between align-items-center mb-3"><div><h4 class="mb-1">Fila de seguidores</h4><small class="text-secondary">Últimos perfis detectados.</small></div><span class="badge text-bg-light">{{ counts.pending }} pendentes</span></div>
+      <div class="table-responsive"><table class="table align-middle"><thead><tr><th>Usuário</th><th>Detectado</th><th>Status</th></tr></thead><tbody>
+        {% for f in followers %}<tr><td><b>@{{ f.username }}</b><br><small class="text-secondary">{{ f.full_name }}</small></td><td class="small">{{ f.first_seen }}</td><td>{% if f.welcomed %}<span class="badge text-bg-success">Concluído</span>{% elif f.last_error %}<span class="badge text-bg-warning">Pendente / erro</span><div class="small text-secondary mt-1">{{ f.last_error }}</div>{% else %}<span class="badge text-bg-secondary">Na fila</span>{% endif %}</td></tr>{% else %}<tr><td colspan="3" class="text-secondary">Nenhum seguidor registrado ainda.</td></tr>{% endfor %}
+      </tbody></table></div>
+      {% if counts.pending > 0 %}<form method="post" action="{{ url_for('followers_mark_baseline') }}" onsubmit="return confirm('Marcar TODOS os pendentes como base? Eles não receberão boas-vindas.');"><button class="btn btn-sm btn-outline-warning">Marcar todos os pendentes como base</button></form>{% endif %}
+    </div></div>
+  </div>
+
+  <div class="col-xl-6">
+    <div class="card shadow-sm h-100"><div class="card-body p-4">
+      <h4 class="mb-3">Histórico de DMs</h4>
+      <div class="table-responsive"><table class="table align-middle"><thead><tr><th>Usuário</th><th>Tipo</th><th>Data</th></tr></thead><tbody>
+        {% for item in logs %}<tr><td>@{{ item.username }}</td><td>{% if item.status == 'sent' %}<span class="badge text-bg-success">Enviada</span>{% elif item.status == 'test' %}<span class="badge text-bg-info">Teste</span>{% else %}<span class="badge text-bg-danger">Erro</span>{% endif %}{% if item.error %}<div class="small text-danger mt-1">{{ item.error }}</div>{% endif %}</td><td class="small">{{ item.created_at }}</td></tr>{% else %}<tr><td colspan="3" class="text-secondary">Nenhuma mensagem registrada.</td></tr>{% endfor %}
+      </tbody></table></div>
+    </div></div>
+  </div>
+</div>
+
+<div class="card shadow-sm"><div class="card-body p-4">
+  <div class="d-flex align-items-center justify-content-between mb-3"><div><h4 class="mb-1">Diagnóstico técnico</h4><small class="text-secondary">Eventos sanitizados do aiograpi e da automação.</small></div><i class="bi bi-terminal fs-3 text-secondary"></i></div>
+  <div class="table-responsive diagnostic-table"><table class="table table-sm align-middle"><thead><tr><th>Data</th><th>Nível</th><th>Evento</th><th>Mensagem / detalhes</th></tr></thead><tbody>
+  {% for item in diagnostic_logs %}<tr><td class="small text-nowrap">{{ item.created_at }}</td><td><span class="badge {% if item.level == 'ERROR' %}text-bg-danger{% elif item.level == 'WARNING' %}text-bg-warning{% else %}text-bg-secondary{% endif %}">{{ item.level }}</span></td><td><code>{{ item.event }}</code></td><td>{{ item.message }}{% if item.details %}<details class="mt-1"><summary class="small">ver detalhes técnicos</summary><pre class="small mt-2 mb-0 text-wrap">{{ item.details }}</pre></details>{% endif %}</td></tr>{% else %}<tr><td colspan="4" class="text-secondary">Sem eventos ainda.</td></tr>{% endfor %}
+  </tbody></table></div>
+</div></div>
+
+<script>
+(function(){
+  const field=document.getElementById('welcome_message');
+  const preview=document.getElementById('messagePreview');
+  if(field&&preview){
+    const update=()=>{preview.textContent=field.value.replaceAll('{first_name}','Kevin').replaceAll('{username}','usuario').replaceAll('{account}','{{ cfg.username or "seuperfil" }}');};
+    field.addEventListener('input',update); update();
+  }
+})();
+</script>
 {% endblock %}

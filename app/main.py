@@ -8,7 +8,9 @@ from .instagram_service import (
     import_browser_session,
     login as ig_login,
     logout as ig_logout,
+    mark_pending_as_baseline,
     save_config,
+    send_test_dm,
     start_worker,
     status,
     sync_once,
@@ -59,10 +61,16 @@ def dashboard():
     logs = rows("SELECT * FROM dm_log ORDER BY id DESC LIMIT 30")
     diagnostic_logs = rows("SELECT * FROM app_log ORDER BY id DESC LIMIT 60")
     followers = rows("SELECT * FROM followers ORDER BY first_seen DESC LIMIT 30")
+    from .db import _is_postgres
+    pending_sql = "SELECT COUNT(*) AS n FROM followers WHERE welcomed=FALSE" if _is_postgres() else "SELECT COUNT(*) AS n FROM followers WHERE welcomed=0"
+    welcomed_sql = "SELECT COUNT(*) AS n FROM followers WHERE welcomed=TRUE" if _is_postgres() else "SELECT COUNT(*) AS n FROM followers WHERE welcomed=1"
     counts = {
         "followers": rows("SELECT COUNT(*) AS n FROM followers")[0]["n"],
+        "welcomed": rows(welcomed_sql)[0]["n"],
+        "pending": rows(pending_sql)[0]["n"],
         "sent": rows("SELECT COUNT(*) AS n FROM dm_log WHERE status='sent'")[0]["n"],
         "errors": rows("SELECT COUNT(*) AS n FROM dm_log WHERE status='error'")[0]["n"],
+        "tests": rows("SELECT COUNT(*) AS n FROM dm_log WHERE status='test'")[0]["n"],
     }
     return render_template("dashboard.html", cfg=cfg, logs=logs, diagnostic_logs=diagnostic_logs, followers=followers, counts=counts)
 
@@ -131,12 +139,23 @@ def instagram_clear_session():
 @app.post("/config")
 @admin_required
 def config():
+    days = ",".join(request.form.getlist("schedule_days"))
     save_config(
         request.form.get("welcome_message", ""),
         request.form.get("welcome_enabled") == "on",
         request.form.get("poll_seconds", "90"),
         request.form.get("max_dms_per_hour", "12"),
         request.form.get("min_dm_delay_seconds", "25"),
+        request.form.get("max_dms_per_day", "80"),
+        request.form.get("max_dm_delay_seconds", "45"),
+        request.form.get("max_retries", "3"),
+        request.form.get("alternate_enabled") == "on",
+        request.form.get("welcome_message_alt", ""),
+        request.form.get("schedule_enabled") == "on",
+        request.form.get("schedule_start", "09:00"),
+        request.form.get("schedule_end", "21:00"),
+        days or "0,1,2,3,4,5,6",
+        request.form.get("excluded_usernames", ""),
     )
     flash("Configurações salvas.", "success")
     return redirect(url_for("dashboard"))
@@ -154,3 +173,19 @@ def sync():
     else:
         flash(result.get("message", "Falha na sincronização."), "danger")
     return redirect(url_for("dashboard"))
+
+
+@app.post("/instagram/test-dm")
+@admin_required
+def instagram_test_dm():
+    ok, msg = send_test_dm(request.form.get("test_username", ""), request.form.get("test_message", "") or None)
+    flash(msg, "success" if ok else "danger")
+    return redirect(url_for("dashboard", tab="automation"))
+
+
+@app.post("/followers/mark-baseline")
+@admin_required
+def followers_mark_baseline():
+    count = mark_pending_as_baseline()
+    flash(f"{count} seguidores pendentes foram marcados como base e não receberão boas-vindas.", "warning")
+    return redirect(url_for("dashboard", tab="queue"))

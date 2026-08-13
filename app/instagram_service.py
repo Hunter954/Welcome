@@ -10,6 +10,7 @@ import threading
 import traceback
 import uuid
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 from aiograpi import Client
@@ -149,6 +150,18 @@ def _bool(v, default=False):
     return str(v).lower() in {"1", "true", "yes", "on"}
 
 
+def _int_setting(key, default, minimum=None, maximum=None):
+    try:
+        value = int(get_setting(key, default))
+    except (TypeError, ValueError):
+        value = int(default)
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
 def status():
     return {
         "connected": _bool(get_setting("ig_connected", "false")),
@@ -156,23 +169,53 @@ def status():
         "last_poll": get_setting("last_poll", "Nunca"),
         "last_error": get_setting("last_error", ""),
         "welcome_enabled": _bool(get_setting("welcome_enabled", os.getenv("WELCOME_ENABLED", "false"))),
-        "poll_seconds": int(get_setting("poll_seconds", os.getenv("POLL_SECONDS", "90"))),
-        "max_dms_per_hour": int(get_setting("max_dms_per_hour", os.getenv("MAX_DMS_PER_HOUR", "12"))),
-        "min_dm_delay_seconds": int(get_setting("min_dm_delay_seconds", os.getenv("MIN_DM_DELAY_SECONDS", "25"))),
+        "poll_seconds": _int_setting("poll_seconds", os.getenv("POLL_SECONDS", "90"), 60, 3600),
+        "max_dms_per_hour": _int_setting("max_dms_per_hour", os.getenv("MAX_DMS_PER_HOUR", "12"), 1, 50),
+        "max_dms_per_day": _int_setting("max_dms_per_day", "80", 1, 500),
+        "min_dm_delay_seconds": _int_setting("min_dm_delay_seconds", os.getenv("MIN_DM_DELAY_SECONDS", "25"), 10, 600),
+        "max_dm_delay_seconds": _int_setting("max_dm_delay_seconds", "45", 10, 900),
+        "max_retries": _int_setting("max_retries", "3", 0, 10),
         "welcome_message": get_setting("welcome_message", "Olá, {first_name}! 👋 Obrigado por seguir @{account}. Seja muito bem-vindo(a)!"),
+        "alternate_enabled": _bool(get_setting("alternate_enabled", "false")),
+        "welcome_message_alt": get_setting("welcome_message_alt", "Oi, {first_name}! 😊 Que bom ter você por aqui. Obrigado por seguir @{account}!"),
+        "schedule_enabled": _bool(get_setting("schedule_enabled", "false")),
+        "schedule_start": get_setting("schedule_start", "09:00"),
+        "schedule_end": get_setting("schedule_end", "21:00"),
+        "schedule_days": get_setting("schedule_days", "0,1,2,3,4,5,6"),
+        "timezone": get_setting("timezone", "America/Sao_Paulo"),
+        "excluded_usernames": get_setting("excluded_usernames", ""),
         "session_saved": os.path.exists(SESSION_FILE),
         "proxy_configured": bool(IG_PROXY_URL),
         "auth_mode": get_setting("ig_auth_mode", "password"),
     }
 
 
-def save_config(message, enabled, poll_seconds, max_dms_per_hour, min_delay):
+def save_config(message, enabled, poll_seconds, max_dms_per_hour, min_delay,
+                max_dms_per_day=80, max_delay=45, max_retries=3, alternate_enabled=False,
+                alternate_message="", schedule_enabled=False, schedule_start="09:00",
+                schedule_end="21:00", schedule_days="0,1,2,3,4,5,6", excluded_usernames=""):
+    min_delay_i = max(10, int(min_delay))
+    max_delay_i = max(min_delay_i, int(max_delay))
     set_setting("welcome_message", message.strip())
     set_setting("welcome_enabled", str(bool(enabled)).lower())
-    set_setting("poll_seconds", max(60, int(poll_seconds)))
+    set_setting("poll_seconds", max(60, min(3600, int(poll_seconds))))
     set_setting("max_dms_per_hour", max(1, min(50, int(max_dms_per_hour))))
-    set_setting("min_dm_delay_seconds", max(10, int(min_delay)))
-    log_event("INFO", "config_saved", "Configurações da automação salvas")
+    set_setting("max_dms_per_day", max(1, min(500, int(max_dms_per_day))))
+    set_setting("min_dm_delay_seconds", min_delay_i)
+    set_setting("max_dm_delay_seconds", min(900, max_delay_i))
+    set_setting("max_retries", max(0, min(10, int(max_retries))))
+    set_setting("alternate_enabled", str(bool(alternate_enabled)).lower())
+    set_setting("welcome_message_alt", alternate_message.strip())
+    set_setting("schedule_enabled", str(bool(schedule_enabled)).lower())
+    set_setting("schedule_start", schedule_start or "09:00")
+    set_setting("schedule_end", schedule_end or "21:00")
+    set_setting("schedule_days", schedule_days or "0,1,2,3,4,5,6")
+    set_setting("timezone", "America/Sao_Paulo")
+    set_setting("excluded_usernames", excluded_usernames.strip())
+    log_event("INFO", "config_saved", "Configurações profissionais da automação salvas", {
+        "enabled": bool(enabled), "hourly_limit": max_dms_per_hour, "daily_limit": max_dms_per_day,
+        "schedule_enabled": bool(schedule_enabled), "alternate_enabled": bool(alternate_enabled),
+    })
 
 
 def _session_fingerprint(path=SESSION_FILE):
@@ -535,9 +578,64 @@ def _dm_count_last_hour():
     return int(r[0]["n"]) if r else 0
 
 
+def _dm_count_today(tz_name="America/Sao_Paulo"):
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = ZoneInfo("America/Sao_Paulo")
+    now_local = datetime.now(tz)
+    start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    cutoff = start_local.astimezone(timezone.utc).isoformat()
+    r = rows("SELECT COUNT(*) AS n FROM dm_log WHERE status='sent' AND created_at >= ?", (cutoff,))
+    return int(r[0]["n"]) if r else 0
+
+
+def _excluded_set(raw):
+    import re
+    return {p.strip().lstrip("@").lower() for p in re.split(r"[,;\n\r\t ]+", raw or "") if p.strip()}
+
+
+def _schedule_allows(cfg):
+    if not cfg.get("schedule_enabled"):
+        return True, "24h"
+    try:
+        tz = ZoneInfo(cfg.get("timezone") or "America/Sao_Paulo")
+    except Exception:
+        tz = ZoneInfo("America/Sao_Paulo")
+    now = datetime.now(tz)
+    allowed_days = {int(x) for x in str(cfg.get("schedule_days", "0,1,2,3,4,5,6")).split(",") if str(x).strip().isdigit()}
+    if now.weekday() not in allowed_days:
+        return False, "dia_fora_da_agenda"
+    try:
+        sh, sm = [int(x) for x in cfg.get("schedule_start", "09:00").split(":")[:2]]
+        eh, em = [int(x) for x in cfg.get("schedule_end", "21:00").split(":")[:2]]
+        start = now.replace(hour=sh, minute=sm, second=0, microsecond=0)
+        end = now.replace(hour=eh, minute=em, second=0, microsecond=0)
+    except Exception:
+        return True, "agenda_invalida_ignorada"
+    if start == end:
+        return True, "24h"
+    if start < end:
+        ok = start <= now <= end
+    else:
+        ok = now >= start or now <= end
+    return ok, "dentro_da_agenda" if ok else "fora_do_horario"
+
+
 def _render_message(template, user, account):
     first = (user.full_name or user.username or "").strip().split(" ")[0]
     return template.replace("{first_name}", first).replace("{username}", user.username or "").replace("{account}", account)
+
+
+def _choose_template(cfg):
+    if cfg.get("alternate_enabled") and (cfg.get("welcome_message_alt") or "").strip() and random.random() < 0.5:
+        return cfg["welcome_message_alt"], "B"
+    return cfg["welcome_message"], "A"
+
+
+def _error_attempts_for(follower_pk):
+    r = rows("SELECT COUNT(*) AS n FROM dm_log WHERE follower_pk=? AND status='error'", (str(follower_pk),))
+    return int(r[0]["n"]) if r else 0
 
 
 async def _sync_once_async(send_messages=True):
@@ -561,11 +659,24 @@ async def _sync_once_async(send_messages=True):
                 )
         sent = 0
         errors = 0
-        if send_messages and cfg["welcome_enabled"] and not baseline:
-            pending_sql = "SELECT pk,username,full_name FROM followers WHERE welcomed=FALSE ORDER BY first_seen ASC LIMIT 25" if _is_postgres() else "SELECT pk,username,full_name FROM followers WHERE welcomed=0 ORDER BY first_seen ASC LIMIT 25"
+        schedule_ok, schedule_reason = _schedule_allows(cfg)
+        if send_messages and cfg["welcome_enabled"] and not baseline and schedule_ok:
+            pending_sql = "SELECT pk,username,full_name FROM followers WHERE welcomed=FALSE ORDER BY first_seen ASC LIMIT 50" if _is_postgres() else "SELECT pk,username,full_name FROM followers WHERE welcomed=0 ORDER BY first_seen ASC LIMIT 50"
             pending = rows(pending_sql)
+            excluded = _excluded_set(cfg.get("excluded_usernames", ""))
             for row in pending:
+                username_norm = (row.get("username") or "").lower().lstrip("@")
+                if username_norm in excluded:
+                    execute("UPDATE followers SET welcomed=?, welcomed_at=?, last_error=? WHERE pk=?", ((True if _is_postgres() else 1), utcnow(), "excluded_by_rule", str(row["pk"])))
+                    log_event("INFO", "follower_excluded", f"@{username_norm} ignorado pela lista de exclusão")
+                    continue
+                if _error_attempts_for(row["pk"]) >= cfg["max_retries"] and cfg["max_retries"] > 0:
+                    continue
                 if _dm_count_last_hour() >= cfg["max_dms_per_hour"]:
+                    log_event("INFO", "hourly_limit_reached", "Limite de DMs por hora atingido", {"limit": cfg["max_dms_per_hour"]})
+                    break
+                if _dm_count_today(cfg.get("timezone")) >= cfg["max_dms_per_day"]:
+                    log_event("INFO", "daily_limit_reached", "Limite diário de DMs atingido", {"limit": cfg["max_dms_per_day"]})
                     break
                 follower_pk = str(row["pk"])
                 user = followers_by_id.get(follower_pk)
@@ -576,13 +687,15 @@ async def _sync_once_async(send_messages=True):
                         execute("UPDATE followers SET last_error=? WHERE pk=?", (str(e), follower_pk))
                         errors += 1
                         continue
-                msg = _render_message(cfg["welcome_message"], user, me.username)
+                template, variant = _choose_template(cfg)
+                msg = _render_message(template, user, me.username)
                 try:
                     await cl.direct_send(msg, user_ids=[int(follower_pk)])
                     execute("UPDATE followers SET welcomed=?, welcomed_at=?, last_error=NULL WHERE pk=?", ((True if _is_postgres() else 1), utcnow(), follower_pk))
                     execute("INSERT INTO dm_log(follower_pk,username,status,message,error,created_at) VALUES(?,?,?,?,?,?)", (follower_pk, row["username"], "sent", msg, None, utcnow()))
                     sent += 1
-                    await asyncio.sleep(cfg["min_dm_delay_seconds"] + random.randint(0, 12))
+                    log_event("INFO", "dm_sent", f"Boas-vindas enviada para @{row['username']}", {"variant": variant})
+                    await asyncio.sleep(random.randint(cfg["min_dm_delay_seconds"], cfg["max_dm_delay_seconds"]))
                 except Exception as e:
                     error_text = f"{type(e).__name__}: {e}"
                     execute("UPDATE followers SET last_error=? WHERE pk=?", (error_text, follower_pk))
@@ -592,9 +705,11 @@ async def _sync_once_async(send_messages=True):
                     if isinstance(e, LoginRequired):
                         set_setting("ig_connected", "false")
                         break
+        if send_messages and cfg["welcome_enabled"] and not baseline and not schedule_ok:
+            log_event("INFO", "schedule_paused", "Envios pausados pela agenda; novos seguidores continuam entrando na fila", {"reason": schedule_reason})
         set_setting("last_poll", utcnow())
         set_setting("last_error", "")
-        log_event("INFO", "sync_completed", "Sincronização concluída", {"new": 0 if baseline else len(new_ids), "sent": sent, "errors": errors, "baseline": baseline, "total": len(followers_by_id)})
+        log_event("INFO", "sync_completed", "Sincronização concluída", {"new": 0 if baseline else len(new_ids), "sent": sent, "errors": errors, "baseline": baseline, "total": len(followers_by_id), "schedule": schedule_reason})
         return {"ok": True, "new": 0 if baseline else len(new_ids), "sent": sent, "errors": errors, "baseline": baseline, "total": len(followers_by_id)}
     except Exception as e:
         set_setting("last_poll", utcnow())
@@ -608,6 +723,45 @@ async def _sync_once_async(send_messages=True):
 def sync_once(send_messages=True):
     with CLIENT_LOCK:
         return _run_async(_sync_once_async(send_messages=send_messages), timeout=900)
+
+
+async def _send_test_dm_async(username, custom_message=None):
+    cl = await _restore_client_async()
+    if not cl:
+        return False, "Instagram não conectado."
+    username = (username or "").strip().lstrip("@")
+    if not username:
+        return False, "Informe um @usuário para o teste."
+    try:
+        pk = await cl.user_id_from_username(username)
+        user = await cl.user_info(pk)
+        me = await cl.account_info()
+        template = (custom_message or status()["welcome_message"]).strip()
+        msg = _render_message(template, user, me.username)
+        await cl.direct_send(msg, user_ids=[int(pk)])
+        execute("INSERT INTO dm_log(follower_pk,username,status,message,error,created_at) VALUES(?,?,?,?,?,?)", (str(pk), username, "test", msg, None, utcnow()))
+        log_event("INFO", "test_dm_sent", f"DM de teste enviada para @{username}")
+        return True, f"DM de teste enviada para @{username}."
+    except Exception as e:
+        msg = f"Falha no teste: {type(e).__name__}: {e}"
+        log_event("ERROR", "test_dm_failed", msg, _exception_details(e, cl, username=username))
+        return False, msg
+
+
+def send_test_dm(username, custom_message=None):
+    with CLIENT_LOCK:
+        return _run_async(_send_test_dm_async(username, custom_message), timeout=180)
+
+
+def mark_pending_as_baseline():
+    pending_sql = "SELECT COUNT(*) AS n FROM followers WHERE welcomed=FALSE" if _is_postgres() else "SELECT COUNT(*) AS n FROM followers WHERE welcomed=0"
+    count = int(rows(pending_sql)[0]["n"])
+    if _is_postgres():
+        execute("UPDATE followers SET welcomed=TRUE, welcomed_at=?, last_error=? WHERE welcomed=FALSE", (utcnow(), "manual_baseline"))
+    else:
+        execute("UPDATE followers SET welcomed=1, welcomed_at=?, last_error=? WHERE welcomed=0", (utcnow(), "manual_baseline"))
+    log_event("WARNING", "pending_marked_baseline", f"{count} pendentes foram marcados como base manualmente")
+    return count
 
 
 def worker_loop():
