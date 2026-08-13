@@ -33,21 +33,15 @@
             <form method="post" action="{{ url_for('instagram_clear_session') }}" onsubmit="return confirm('Apagar a sessão salva do Instagram?');"><button class="btn btn-outline-secondary w-100">Limpar sessão persistente</button></form>
           </div>
         {% else %}
-          <div class="alert alert-warning small">Nenhuma conta conectada. Recomendado: importar a sessão do Chrome.</div>
+          <div class="alert alert-warning small">Nenhuma conta conectada. Faça um login dedicado para criar uma sessão exclusiva da automação.</div>
           <form method="post" action="{{ url_for('instagram_login') }}">
             <div class="mb-2"><label class="form-label">Usuário</label><input class="form-control" name="username" autocomplete="username" required></div>
             <div class="mb-3"><label class="form-label">Senha</label><input class="form-control" type="password" name="password" autocomplete="current-password" required></div>
             <button class="btn btn-dark w-100">Conectar com senha</button>
           </form>
-          <div class="text-center text-secondary small my-3">ou</div>
-          <details class="border rounded-4 p-3" open>
-            <summary class="fw-semibold"><i class="bi bi-browser-chrome me-2"></i>Importar sessão do Chrome</summary>
-            <form method="post" action="{{ url_for('instagram_import_session') }}" enctype="multipart/form-data" class="mt-3">
-              <textarea class="form-control font-monospace mb-2" rows="3" name="session_data" placeholder="Cole o valor do sessionid"></textarea>
-              <input class="form-control mb-3" type="file" name="session_file" accept=".json,.txt,text/plain,application/json">
-              <button class="btn btn-outline-primary w-100">Validar e importar</button>
-            </form>
-          </details>
+          <div class="alert alert-light border small mt-3 mb-0">
+            <b>Sessão dedicada:</b> este login cria uma identidade separada para o bot. O sistema não usa mais o <code>sessionid</code> do Chrome.
+          </div>
         {% endif %}
 
         {% if request.args.get('twofa') %}
@@ -56,11 +50,14 @@
 
         <hr>
         <div class="status-list small">
-          <div><span>Autenticação</span><b>{{ 'Sessão do navegador' if cfg.auth_mode == 'browser_session' else 'Usuário/senha' }}</b></div>
+          <div><span>Autenticação</span><b>{{ 'Sessão dedicada do bot' if cfg.dedicated_session else 'Aguardando sessão dedicada' }}</b></div>
           <div><span>Sessão persistente</span><b class="{{ 'text-success' if cfg.session_saved else 'text-warning' }}">{{ 'Salva' if cfg.session_saved else 'Não criada' }}</b></div>
-          <div><span>Proxy/IP estável</span><b>{{ 'Configurado' if cfg.proxy_configured else 'Não configurado' }}</b></div>
+          <div><span>Proxy/IP estável</span><b class="{{ 'text-success' if cfg.proxy_configured else 'text-warning' }}">{{ 'Configurado' if cfg.proxy_configured else 'Ausente' }}</b></div>
           <div><span>Última sincronização</span><b>{{ cfg.last_poll }}</b></div>
         </div>
+        {% if not cfg.proxy_configured %}
+          <div class="alert alert-warning small mt-3 mb-0"><b>Recomendado:</b> configure <code>IG_PROXY_URL</code> no Railway com um proxy residencial/mobile fixo. Sem IP estável, o Instagram pode invalidar a sessão dedicada.</div>
+        {% endif %}
         {% if cfg.last_error %}<div class="alert alert-danger small mt-3 mb-0">{{ cfg.last_error }}</div>{% endif %}
       </div>
     </div>

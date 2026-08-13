@@ -169,8 +169,9 @@ def _int_setting(key, default, minimum=None, maximum=None):
 
 
 def status():
+    auth_mode = get_setting("ig_auth_mode", "")
     return {
-        "connected": _bool(get_setting("ig_connected", "false")),
+        "connected": _bool(get_setting("ig_connected", "false")) and auth_mode == "dedicated",
         "username": get_setting("ig_username", ""),
         "last_poll": get_setting("last_poll", "Nunca"),
         "last_error": get_setting("last_error", ""),
@@ -194,7 +195,8 @@ def status():
         "excluded_usernames": get_setting("excluded_usernames", ""),
         "session_saved": os.path.exists(SESSION_FILE),
         "proxy_configured": bool(IG_PROXY_URL),
-        "auth_mode": get_setting("ig_auth_mode", "password"),
+        "auth_mode": auth_mode or "dedicated",
+        "dedicated_session": auth_mode == "dedicated",
     }
 
 
@@ -232,6 +234,19 @@ def _session_fingerprint(path=SESSION_FILE):
         return None
 
 
+def _purge_session_files():
+    removed = False
+    for path in (SESSION_FILE, SESSION_BACKUP_FILE, SESSION_FILE + ".tmp"):
+        try:
+            os.remove(path)
+            removed = True
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+    return removed
+
+
 def _safe_dump_settings(cl):
     """Grava a sessão de forma atômica e mantém uma cópia de segurança."""
     tmp = SESSION_FILE + ".tmp"
@@ -257,7 +272,7 @@ def _safe_dump_settings(cl):
 
 async def _new_client(load_saved_session=True):
     cl = Client()
-    cl.delay_range = [1, 3]
+    cl.delay_range = [1, 2]
     if IG_PROXY_URL:
         try:
             cl.set_proxy(IG_PROXY_URL)
@@ -294,71 +309,74 @@ async def _new_client(load_saved_session=True):
 
 
 async def _restore_client_async():
+    """Restaura somente a sessão dedicada do bot.
+
+    Sessões importadas do navegador não são reutilizadas para evitar que o
+    Instagram associe o mesmo sessionid web a um cliente mobile/datacenter.
+    """
     global client
     if client is not None:
         return client
 
     username = get_setting("ig_username")
     enc_password = get_setting("ig_password_enc")
-    enc_sessionid = get_setting("ig_sessionid_enc")
-    if not username:
+    auth_mode = get_setting("ig_auth_mode", "")
+    if not username or auth_mode != "dedicated":
+        if auth_mode == "browser_session":
+            set_setting("ig_connected", "false")
+            set_setting("last_error", "Sessão antiga do Chrome desativada. Faça um login para criar a sessão dedicada do bot.")
         return None
 
     cl = await _new_client(load_saved_session=True)
     attempt_id = uuid.uuid4().hex[:10]
     session_loaded = getattr(cl, "_automation_session_loaded", False)
-    log_event("INFO", "session_restore_started", "Tentando restaurar sessão do Instagram", {
+    log_event("INFO", "dedicated_session_restore_started", "Restaurando sessão dedicada do bot", {
         "attempt_id": attempt_id,
         "username": username,
         "session_loaded": session_loaded,
-        "auth_mode": get_setting("ig_auth_mode", "password"),
+        "proxy_configured": bool(IG_PROXY_URL),
         "has_password_fallback": bool(enc_password),
-        "has_sessionid_fallback": bool(enc_sessionid),
     })
 
-    # Primeiro tenta usar diretamente os settings persistidos. Isso evita um novo
-    # login e preserva a identidade/dispositivo já aceitos pelo Instagram.
-    if session_loaded:
-        try:
-            info = await cl.account_info()
-            set_setting("ig_connected", "true")
-            set_setting("last_error", "")
-            client = cl
-            log_event("INFO", "session_restore_success", f"Sessão persistida validada para @{info.username}", {
-                "attempt_id": attempt_id, "method": "saved_settings",
-            })
-            return client
-        except Exception as saved_error:
-            log_event("WARNING", "saved_session_validation_failed", "Settings salvos não foram aceitos; tentando fallback de autenticação", _exception_details(saved_error, cl, attempt_id, username, session_loaded))
-
     try:
-        if enc_sessionid:
-            sessionid = decrypt(enc_sessionid)
-            await cl.login_by_sessionid(sessionid)
-            method = "sessionid"
+        if session_loaded:
+            # A documentação do aiograpi recomenda carregar os settings e usar
+            # login() com as mesmas credenciais; ele valida/reutiliza a sessão
+            # e só reloga se o Instagram responder login_required.
+            if enc_password:
+                await cl.login(username, decrypt(enc_password))
+            info = await cl.account_info()
+            _safe_dump_settings(cl)
+            method = "saved_dedicated_session"
         elif enc_password:
-            password = decrypt(enc_password)
-            await cl.login(username, password)
-            method = "password"
+            await cl.login(username, decrypt(enc_password))
+            info = await cl.account_info()
+            _safe_dump_settings(cl)
+            method = "password_fallback"
         else:
-            raise LoginRequired("Nenhum método de autenticação de fallback disponível")
+            raise LoginRequired("Sessão dedicada ausente e nenhuma credencial de fallback disponível")
 
-        info = await cl.account_info()
-        _safe_dump_settings(cl)
         set_setting("ig_connected", "true")
         set_setting("last_error", "")
         client = cl
-        log_event("INFO", "session_restore_success", f"Sessão restaurada para @{info.username}", {
-            "attempt_id": attempt_id, "method": method,
+        log_event("INFO", "dedicated_session_restore_success", f"Sessão dedicada validada para @{info.username}", {
+            "attempt_id": attempt_id,
+            "method": method,
+            "proxy_configured": bool(IG_PROXY_URL),
+            "session_fingerprint": _session_fingerprint(),
         })
         return client
+    except (ClientLoginRequired, LoginRequired) as e:
+        set_setting("ig_connected", "false")
+        set_setting("last_error", "Sessão dedicada expirada. Reconecte a conta no painel.")
+        log_event("ERROR", "dedicated_session_login_required", "Sessão dedicada expirou e a automação foi pausada", _exception_details(e, cl, attempt_id, username, session_loaded))
+        return None
     except Exception as e:
-        err = f"Falha ao restaurar sessão: {type(e).__name__}: {e}"
+        err = f"Falha ao restaurar sessão dedicada: {type(e).__name__}: {e}"
         set_setting("ig_connected", "false")
         set_setting("last_error", err)
-        log_event("ERROR", "session_restore_failed", err, _exception_details(e, cl, attempt_id, username, session_loaded))
+        log_event("ERROR", "dedicated_session_restore_failed", err, _exception_details(e, cl, attempt_id, username, session_loaded))
         return None
-
 
 def _load_client():
     with CLIENT_LOCK:
@@ -368,7 +386,18 @@ def _load_client():
 async def _login_async(username, password, verification_code=None):
     global client
     attempt_id = uuid.uuid4().hex[:10]
-    cl = await _new_client(load_saved_session=True)
+    if not IG_PROXY_URL:
+        msg = "Configure IG_PROXY_URL no Railway com um proxy residencial/mobile fixo antes de criar a sessão dedicada."
+        set_setting("last_error", msg)
+        log_event("WARNING", "dedicated_login_blocked_no_proxy", msg, {"attempt_id": attempt_id})
+        return False, msg
+    use_saved = get_setting("ig_auth_mode", "") == "dedicated" and os.path.exists(SESSION_FILE)
+    if not use_saved:
+        removed_old = _purge_session_files()
+        set_setting("ig_sessionid_enc", "")
+        if removed_old:
+            log_event("INFO", "legacy_session_removed", "Sessão anterior removida antes de criar a sessão dedicada")
+    cl = await _new_client(load_saved_session=use_saved)
     session_loaded = getattr(cl, "_automation_session_loaded", False)
     log_event("INFO", "login_started", "Tentativa de login iniciada", {
         "attempt_id": attempt_id,
@@ -377,6 +406,8 @@ async def _login_async(username, password, verification_code=None):
         "session_file_exists": os.path.exists(SESSION_FILE),
         "session_loaded": session_loaded,
         "library": "aiograpi",
+        "session_mode": "dedicated",
+        "proxy_configured": bool(IG_PROXY_URL),
     })
     try:
         if verification_code:
@@ -390,7 +421,7 @@ async def _login_async(username, password, verification_code=None):
         set_setting("ig_user_id", str(getattr(info, "pk", "")))
         set_setting("ig_password_enc", encrypt(password))
         set_setting("ig_sessionid_enc", "")
-        set_setting("ig_auth_mode", "password")
+        set_setting("ig_auth_mode", "dedicated")
         set_setting("ig_connected", "true")
         set_setting("last_error", "")
         client = cl
@@ -456,93 +487,10 @@ def login(username, password, verification_code=None):
         return _run_async(_login_async(username, password, verification_code))
 
 
-def _extract_sessionid(raw):
-    """Aceita sessionid puro, Cookie header ou JSON exportado pelo navegador."""
-    raw = (raw or "").strip()
-    if not raw:
-        return None
-
-    # JSON: {"sessionid": "..."}, {"cookies": [...]}, ou lista de cookies.
-    try:
-        data = json.loads(raw)
-        if isinstance(data, dict):
-            direct = data.get("sessionid")
-            if direct:
-                return str(direct).strip()
-            data = data.get("cookies", data.get("data", data))
-        if isinstance(data, list):
-            for item in data:
-                if isinstance(item, dict) and str(item.get("name", "")).lower() == "sessionid":
-                    value = item.get("value")
-                    if value:
-                        return str(value).strip()
-    except Exception:
-        pass
-
-    # Cookie header / export textual: sessionid=VALUE; csrftoken=...
-    import re
-    match = re.search(r'(?:^|[;\s])sessionid\s*=\s*([^;\s]+)', raw, flags=re.I)
-    if match:
-        return match.group(1).strip().strip('"\'')
-
-    # Netscape cookie export: domínio, flags, path, secure, expires, name, value.
-    for line in raw.splitlines():
-        parts = line.strip().split('\t')
-        if len(parts) >= 7 and parts[-2].lower() == "sessionid" and parts[-1]:
-            return parts[-1].strip()
-
-    # Se não parece estrutura de cookie, assume que o usuário colou apenas o valor.
-    if "=" not in raw and "\n" not in raw and "\r" not in raw and len(raw) >= 10:
-        return raw
-    return None
-
-
-async def _import_browser_session_async(raw):
-    global client
-    attempt_id = uuid.uuid4().hex[:10]
-    sessionid = _extract_sessionid(raw)
-    log_event("INFO", "browser_session_import_started", "Importação manual de sessão do navegador iniciada", {
-        "attempt_id": attempt_id,
-        "payload_format_detected": "sessionid" if sessionid else "unknown",
-        "payload_length": len(raw or ""),
-    })
-    if not sessionid:
-        msg = "Não encontrei o cookie sessionid. Cole o valor do sessionid, o Cookie header ou um JSON exportado do instagram.com."
-        log_event("WARNING", "browser_session_missing_sessionid", msg, {"attempt_id": attempt_id})
-        return False, msg
-
-    cl = await _new_client(load_saved_session=False)
-    try:
-        await cl.login_by_sessionid(sessionid)
-        info = await cl.account_info()
-        _safe_dump_settings(cl)
-        set_setting("ig_username", info.username or "")
-        set_setting("ig_user_id", str(getattr(info, "pk", "")))
-        set_setting("ig_password_enc", "")
-        set_setting("ig_sessionid_enc", encrypt(sessionid))
-        set_setting("ig_auth_mode", "browser_session")
-        set_setting("ig_connected", "true")
-        set_setting("last_error", "")
-        client = cl
-        _invalidate_role_clients()
-        log_event("INFO", "browser_session_import_success", f"Sessão do navegador validada para @{info.username}", {
-            "attempt_id": attempt_id,
-            "instagram_user_id": str(getattr(info, "pk", "")),
-            "session_fingerprint": _session_fingerprint(),
-        })
-        return True, f"Sessão importada e validada. Conectado como @{info.username}"
-    except Exception as e:
-        msg = f"O Instagram não aceitou esse sessionid para a API privada: {type(e).__name__}: {e}"
-        set_setting("last_error", msg)
-        details = _exception_details(e, cl, attempt_id, None, False)
-        details["import_method"] = "login_by_sessionid"
-        log_event("ERROR", "browser_session_import_failed", msg, details)
-        return False, msg
-
-
 def import_browser_session(raw):
-    with CLIENT_LOCK:
-        return _run_async(_import_browser_session_async(raw))
+    """Desativado: a automação usa somente sessão dedicada do bot."""
+    log_event("WARNING", "browser_session_import_blocked", "Importação de sessionid do navegador está desativada no modo dedicado")
+    return False, "Importação de sessão do Chrome foi desativada. Use o login dedicado do bot."
 
 
 def logout():
@@ -553,7 +501,7 @@ def logout():
         set_setting("ig_connected", "false")
         set_setting("ig_password_enc", "")
         set_setting("ig_sessionid_enc", "")
-        set_setting("ig_auth_mode", "password")
+        set_setting("ig_auth_mode", "dedicated")
         removed = False
         for path in (SESSION_FILE, SESSION_BACKUP_FILE):
             try:
@@ -571,8 +519,7 @@ def clear_saved_session():
         _invalidate_role_clients()
         set_setting("ig_connected", "false")
         set_setting("ig_sessionid_enc", "")
-        if get_setting("ig_auth_mode", "password") == "browser_session":
-            set_setting("ig_auth_mode", "password")
+        set_setting("ig_auth_mode", "dedicated")
         removed = False
         for path in (SESSION_FILE, SESSION_BACKUP_FILE):
             try:
@@ -668,15 +615,12 @@ async def _role_client_async(role):
         if session_loaded:
             info = await cl.account_info()
         else:
-            enc_sessionid = get_setting("ig_sessionid_enc")
             enc_password = get_setting("ig_password_enc")
             username = get_setting("ig_username")
-            if enc_sessionid:
-                await cl.login_by_sessionid(decrypt(enc_sessionid))
-            elif enc_password and username:
+            if enc_password and username and get_setting("ig_auth_mode", "") == "dedicated":
                 await cl.login(username, decrypt(enc_password))
             else:
-                raise LoginRequired("Nenhuma sessão disponível")
+                raise LoginRequired("Nenhuma sessão dedicada disponível")
             info = await cl.account_info()
         set_setting("ig_user_id", str(getattr(info, "pk", "")))
         set_setting("ig_username", getattr(info, "username", "") or get_setting("ig_username", ""))
@@ -785,7 +729,7 @@ async def _detect_followers_async(force_full=False):
         set_setting("ig_connected", "false")
         with ROLE_CLIENTS_LOCK:
             ROLE_CLIENTS.pop("detector", None)
-        log_event("ERROR", "detector_login_required", "Sessão invalidada; automação pausada até reconectar/importar a sessão novamente", {
+        log_event("ERROR", "detector_login_required", "Sessão dedicada invalidada; automação pausada até reconectar a conta", {
             "error": f"{type(e).__name__}: {e}"
         })
         return {"ok": False, "message": f"{type(e).__name__}: {e}", "reauth_required": True}
