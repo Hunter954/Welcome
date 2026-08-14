@@ -1,0 +1,192 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="d-flex justify-content-end mb-2"><span class="badge text-bg-dark">Build {{ cfg.app_version }} · {{ cfg.boot_id }}</span></div>
+<div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-4">
+  <div>
+    <h2 class="mb-1">Central da Automação</h2>
+    <p class="text-secondary mb-0">Boas-vindas automáticas, fila, limites e diagnóstico em um só lugar.</p>
+  </div>
+  <form method="post" action="{{ url_for('sync') }}">
+    <button class="btn btn-dark"><i class="bi bi-arrow-repeat me-2"></i>Sincronizar agora</button>
+  </form>
+</div>
+
+<div class="row g-3 mb-4">
+  <div class="col-6 col-lg-3"><div class="metric"><small>Seguidores monitorados</small><strong>{{ counts.followers }}</strong></div></div>
+  <div class="col-6 col-lg-3"><div class="metric"><small>Boas-vindas concluídas</small><strong>{{ counts.welcomed }}</strong></div></div>
+  <div class="col-6 col-lg-3"><div class="metric"><small>Na fila</small><strong>{{ counts.pending }}</strong></div></div>
+  <div class="col-6 col-lg-3"><div class="metric"><small>Erros registrados</small><strong>{{ counts.errors }}</strong></div></div>
+</div>
+
+<div class="row g-4 mb-4">
+  <div class="col-xl-4">
+    <div class="card shadow-sm h-100">
+      <div class="card-body p-4">
+        <div class="d-flex align-items-center justify-content-between mb-3">
+          <h4 class="mb-0">Conta do Instagram</h4>
+          {% if cfg.connected %}<span class="badge text-bg-success">ONLINE</span>{% else %}<span class="badge text-bg-warning">DESCONECTADO</span>{% endif %}
+        </div>
+
+        {% if cfg.connected %}
+          <div class="account-box mb-3"><div class="avatar-mini"><i class="bi bi-instagram"></i></div><div><div class="fw-bold">@{{ cfg.username }}</div><small class="text-secondary">Sessão validada</small></div></div>
+          <div class="d-grid gap-2">
+            <form method="post" action="{{ url_for('instagram_disconnect') }}"><button class="btn btn-outline-danger w-100">Desconectar conta</button></form>
+            <form method="post" action="{{ url_for('instagram_clear_session') }}" onsubmit="return confirm('Apagar a sessão salva do Instagram?');"><button class="btn btn-outline-secondary w-100">Limpar sessão persistente</button></form>
+          </div>
+        {% else %}
+          <div class="alert alert-warning small">Nenhuma conta conectada. Importe um <code>sessionid</code>. Após conectar, <b>Detector e Disparo começam pausados</b> para isolar a causa de qualquer logout.</div>
+          <details class="border rounded p-3 mb-3" open>
+            <summary class="fw-semibold" style="cursor:pointer">Importar sessionid do Chrome</summary>
+            <div class="mt-3">
+              <form method="post" action="{{ url_for('instagram_import_session') }}" enctype="multipart/form-data">
+                <label class="form-label small">Sessionid / Cookie header / JSON exportado</label>
+                <textarea class="form-control font-monospace mb-2" rows="4" name="session_data" placeholder="Cole somente o valor do sessionid ou sessionid=...;"></textarea>
+                <input class="form-control mb-3" type="file" name="session_file" accept=".json,.txt,text/plain,application/json">
+                <div class="alert alert-light border small py-2">O conteúdo do cookie não aparece nos logs. O <code>sessionid</code> é armazenado criptografado.</div>
+                <button class="btn btn-primary w-100">Validar e importar sessão</button>
+              </form>
+            </div>
+          </details>
+          <details class="border rounded p-3">
+            <summary class="fw-semibold" style="cursor:pointer">Alternativa: login com usuário e senha</summary>
+            <form method="post" action="{{ url_for('instagram_login') }}" class="mt-3">
+              <div class="mb-2"><label class="form-label">Usuário</label><input class="form-control" name="username" autocomplete="username" required></div>
+              <div class="mb-3"><label class="form-label">Senha</label><input class="form-control" type="password" name="password" autocomplete="current-password" required></div>
+              <button class="btn btn-dark w-100">Conectar com senha</button>
+            </form>
+          </details>
+        {% endif %}
+
+        {% if request.args.get('twofa') %}
+          <hr><form method="post" action="{{ url_for('instagram_2fa') }}"><label class="form-label">Código 2FA</label><div class="input-group"><input class="form-control" name="verification_code" required inputmode="numeric"><button class="btn btn-dark">Validar</button></div></form>
+        {% endif %}
+
+        <hr>
+        <div class="status-list small">
+          <div><span>Biblioteca</span><b>instagrapi</b></div>
+          <div><span>Autenticação</span><b>{{ 'Sessionid do navegador' if cfg.auth_mode == 'sessionid' else 'Usuário/senha' }}</b></div>
+          <div><span>Sessão persistente</span><b class="{{ 'text-success' if cfg.session_saved else 'text-warning' }}">{{ 'Salva' if cfg.session_saved else 'Não criada' }}</b></div>
+          <div><span>Detector</span><b class="{{ 'text-success' if cfg.detector_enabled else 'text-secondary' }}">{{ 'ATIVO' if cfg.detector_enabled else 'PAUSADO' }} · {{ cfg.poll_seconds }}s</b></div>
+          <div><span>Disparo</span><b class="{{ 'text-success' if cfg.sender_enabled else 'text-secondary' }}">{{ 'ATIVO' if cfg.sender_enabled else 'PAUSADO' }}</b></div>
+          <div><span>Última operação</span><b>{{ cfg.last_operation or 'Nenhuma' }}</b></div>
+          <div><span>Última sincronização</span><b>{{ cfg.last_poll }}</b></div>
+        </div>
+        {% if cfg.last_error %}<div class="alert alert-danger small mt-3 mb-0">{{ cfg.last_error }}</div>{% endif %}
+      </div>
+    </div>
+  </div>
+
+  <div class="col-xl-8">
+    <div class="card shadow-sm h-100">
+      <div class="card-body p-4">
+        <div class="d-flex flex-wrap justify-content-between gap-2 align-items-center mb-4">
+          <div><h4 class="mb-1">Automação de boas-vindas</h4><small class="text-secondary">Novos seguidores entram na fila; os controles abaixo decidem quando e como enviar.</small></div>
+          <span class="badge rounded-pill {{ 'text-bg-success' if cfg.welcome_enabled else 'text-bg-secondary' }} fs-6">{{ 'ATIVA' if cfg.welcome_enabled else 'PAUSADA' }}</span>
+        </div>
+
+        <form method="post" action="{{ url_for('config') }}">
+          <div class="form-check form-switch automation-switch mb-4">
+            <input class="form-check-input" type="checkbox" role="switch" id="welcome_enabled" name="welcome_enabled" {% if cfg.welcome_enabled %}checked{% endif %}>
+            <label class="form-check-label fw-semibold" for="welcome_enabled">Enviar boas-vindas automaticamente</label>
+          </div>
+
+          <label class="form-label fw-semibold">Mensagem de boas-vindas</label>
+          <textarea class="form-control mb-2" rows="5" id="welcome_message" name="welcome_message" required>{{ cfg.welcome_message }}</textarea>
+          <div class="small text-secondary mb-4">Variáveis: <code>{first_name}</code> <code>{username}</code> <code>{account}</code></div>
+
+          <div class="alert alert-info border-0 mb-4">
+            <div class="fw-semibold mb-1"><i class="bi bi-activity me-1"></i> Modo diagnóstico</div>
+            <div class="small">O detector consulta somente os <b>25 seguidores mais recentes a cada {{ cfg.poll_seconds }} segundos</b>. Detector e disparo podem ser ligados/desligados separadamente para descobrir qual operação está invalidando a sessão.</div>
+          </div>
+
+          <div class="row g-3 mb-4">
+            <div class="col-md-6">
+              <div class="border rounded p-3 h-100">
+                <div class="form-check form-switch">
+                  <input class="form-check-input" type="checkbox" id="detector_enabled" name="detector_enabled" {% if cfg.detector_enabled %}checked{% endif %}>
+                  <label class="form-check-label fw-semibold" for="detector_enabled">Detector de novos seguidores</label>
+                </div>
+                <div class="small text-secondary mt-2">Desative para testar se apenas os disparos mantêm a sessão estável.</div>
+              </div>
+            </div>
+            <div class="col-md-6">
+              <div class="border rounded p-3 h-100">
+                <div class="form-check form-switch">
+                  <input class="form-check-input" type="checkbox" id="sender_enabled" name="sender_enabled" {% if cfg.sender_enabled %}checked{% endif %}>
+                  <label class="form-check-label fw-semibold" for="sender_enabled">Disparo automático de DM</label>
+                </div>
+                <div class="small text-secondary mt-2">Desative para testar somente a leitura de seguidores sem enviar mensagens.</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="mb-4">
+            <label class="form-label fw-semibold">Lista de exclusão</label>
+            <textarea class="form-control" rows="2" name="excluded_usernames" placeholder="@usuario1, @usuario2">{{ cfg.excluded_usernames }}</textarea>
+            <div class="form-text">Esses perfis serão registrados, mas não receberão a mensagem automática.</div>
+          </div>
+
+          <div class="d-flex flex-wrap gap-2">
+            <button class="btn btn-primary px-4"><i class="bi bi-check2-circle me-2"></i>Salvar automação</button>
+          </div>
+        </form>
+
+        {% if cfg.connected %}
+        <hr class="my-4">
+        <div class="row g-3 align-items-end">
+          <div class="col-md-8">
+            <h5 class="mb-1">Enviar DM de teste</h5><small class="text-secondary">Testa a mensagem principal sem alterar a fila.</small>
+            <form method="post" action="{{ url_for('instagram_test_dm') }}" class="row g-2 mt-1">
+              <div class="col-sm-5"><input class="form-control" name="test_username" placeholder="@usuario" required></div>
+              <div class="col-sm-7"><button class="btn btn-outline-dark w-100"><i class="bi bi-send me-2"></i>Enviar mensagem de teste</button></div>
+            </form>
+          </div>
+          <div class="col-md-4">
+            <div class="preview-box"><small>Prévia rápida</small><div id="messagePreview" class="mt-2">{{ cfg.welcome_message }}</div></div>
+          </div>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-4 mb-4">
+  <div class="col-xl-6">
+    <div class="card shadow-sm h-100"><div class="card-body p-4">
+      <div class="d-flex justify-content-between align-items-center mb-3"><div><h4 class="mb-1">Fila de seguidores</h4><small class="text-secondary">Últimos perfis detectados.</small></div><span class="badge text-bg-light">{{ counts.pending }} pendentes</span></div>
+      <div class="table-responsive"><table class="table align-middle"><thead><tr><th>Usuário</th><th>Detectado</th><th>Status</th></tr></thead><tbody>
+        {% for f in followers %}<tr><td><b>@{{ f.username }}</b><br><small class="text-secondary">{{ f.full_name }}</small></td><td class="small">{{ f.first_seen }}</td><td>{% if f.welcomed %}<span class="badge text-bg-success">Concluído</span>{% elif f.last_error %}<span class="badge text-bg-warning">Pendente / erro</span><div class="small text-secondary mt-1">{{ f.last_error }}</div>{% else %}<span class="badge text-bg-secondary">Na fila</span>{% endif %}</td></tr>{% else %}<tr><td colspan="3" class="text-secondary">Nenhum seguidor registrado ainda.</td></tr>{% endfor %}
+      </tbody></table></div>
+      {% if counts.pending > 0 %}<form method="post" action="{{ url_for('followers_mark_baseline') }}" onsubmit="return confirm('Marcar TODOS os pendentes como base? Eles não receberão boas-vindas.');"><button class="btn btn-sm btn-outline-warning">Marcar todos os pendentes como base</button></form>{% endif %}
+    </div></div>
+  </div>
+
+  <div class="col-xl-6">
+    <div class="card shadow-sm h-100"><div class="card-body p-4">
+      <h4 class="mb-3">Histórico de DMs</h4>
+      <div class="table-responsive"><table class="table align-middle"><thead><tr><th>Usuário</th><th>Tipo</th><th>Data</th></tr></thead><tbody>
+        {% for item in logs %}<tr><td>@{{ item.username }}</td><td>{% if item.status == 'sent' %}<span class="badge text-bg-success">Enviada</span>{% elif item.status == 'test' %}<span class="badge text-bg-info">Teste</span>{% else %}<span class="badge text-bg-danger">Erro</span>{% endif %}{% if item.error %}<div class="small text-danger mt-1">{{ item.error }}</div>{% endif %}</td><td class="small">{{ item.created_at }}</td></tr>{% else %}<tr><td colspan="3" class="text-secondary">Nenhuma mensagem registrada.</td></tr>{% endfor %}
+      </tbody></table></div>
+    </div></div>
+  </div>
+</div>
+
+<div class="card shadow-sm"><div class="card-body p-4">
+  <div class="d-flex align-items-center justify-content-between mb-3"><div><h4 class="mb-1">Diagnóstico técnico</h4><small class="text-secondary">Eventos sanitizados do instagrapi, separados por detector e disparo.</small></div><i class="bi bi-terminal fs-3 text-secondary"></i></div>
+  <div class="table-responsive diagnostic-table"><table class="table table-sm align-middle"><thead><tr><th>Data</th><th>Nível</th><th>Evento</th><th>Mensagem / detalhes</th></tr></thead><tbody>
+  {% for item in diagnostic_logs %}<tr><td class="small text-nowrap">{{ item.created_at }}</td><td><span class="badge {% if item.level == 'ERROR' %}text-bg-danger{% elif item.level == 'WARNING' %}text-bg-warning{% else %}text-bg-secondary{% endif %}">{{ item.level }}</span></td><td><code>{{ item.event }}</code></td><td>{{ item.message }}{% if item.details %}<details class="mt-1"><summary class="small">ver detalhes técnicos</summary><pre class="small mt-2 mb-0 text-wrap">{{ item.details }}</pre></details>{% endif %}</td></tr>{% else %}<tr><td colspan="4" class="text-secondary">Sem eventos ainda.</td></tr>{% endfor %}
+  </tbody></table></div>
+</div></div>
+
+<script>
+(function(){
+  const field=document.getElementById('welcome_message');
+  const preview=document.getElementById('messagePreview');
+  if(field&&preview){
+    const update=()=>{preview.textContent=field.value.replaceAll('{first_name}','Kevin').replaceAll('{username}','usuario').replaceAll('{account}','{{ cfg.username or "seuperfil" }}');};
+    field.addEventListener('input',update); update();
+  }
+})();
+</script>
+{% endblock %}
