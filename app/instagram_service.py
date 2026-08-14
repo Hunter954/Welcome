@@ -15,11 +15,9 @@ from instagrapi import Client
 from instagrapi.exceptions import (
     BadPassword,
     ChallengeRequired,
-    CheckpointRequired,
     ClientConnectionError,
     ClientLoginRequired,
     ClientThrottledError,
-    ConsentRequired,
     LoginRequired,
     PleaseWaitFewMinutes,
     SentryBlock,
@@ -39,7 +37,7 @@ SESSION_BACKUP_FILE = os.path.join(DATA_DIR, "instagram_session.backup.json")
 # de isolamento, mas não fica exposto no painel para evitar polling agressivo.
 DETECTOR_POLL_SECONDS = 60
 LATEST_FOLLOWERS_AMOUNT = 25
-APP_VERSION = "2026.08.14-instagrapi-clean-1"
+APP_VERSION = "2026.08.14-instagrapi-clean-2"
 BOOT_ID = uuid.uuid4().hex[:8]
 
 LOGGER = logging.getLogger("instagram_automation")
@@ -330,7 +328,7 @@ def login(username, password, verification_code=None):
         return True, f"Conectado como @{info.username}"
     except TwoFactorRequired:
         return False, "2FA_REQUIRED"
-    except (BadPassword, ChallengeRequired, CheckpointRequired, ConsentRequired, SentryBlock,
+    except (BadPassword, ChallengeRequired, SentryBlock,
             PleaseWaitFewMinutes, ClientThrottledError, ClientConnectionError, ClientLoginRequired, LoginRequired) as e:
         msg = f"{type(e).__name__}: {e}"
         set_setting("last_error", msg)
