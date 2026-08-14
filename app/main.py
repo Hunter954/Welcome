@@ -14,6 +14,8 @@ from .instagram_service import (
     start_worker,
     status,
     sync_once,
+    APP_VERSION,
+    BOOT_ID,
 )
 
 app = Flask(__name__)
@@ -33,7 +35,13 @@ def admin_required(fn):
 
 @app.get("/health")
 def health():
-    return {"ok": True}, 200
+    return {
+        "ok": True,
+        "app_version": APP_VERSION,
+        "boot_id": BOOT_ID,
+        "library": "instagrapi",
+        "git_commit": os.getenv("RAILWAY_GIT_COMMIT_SHA", "")[:12],
+    }, 200
 
 
 @app.route("/login", methods=["GET", "POST"])

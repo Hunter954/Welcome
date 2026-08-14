@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
+<div class="d-flex justify-content-end mb-2"><span class="badge text-bg-dark">Build {{ cfg.app_version }} · {{ cfg.boot_id }}</span></div>
 <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-4">
   <div>
     <h2 class="mb-1">Central da Automação</h2>
@@ -33,7 +34,7 @@
             <form method="post" action="{{ url_for('instagram_clear_session') }}" onsubmit="return confirm('Apagar a sessão salva do Instagram?');"><button class="btn btn-outline-secondary w-100">Limpar sessão persistente</button></form>
           </div>
         {% else %}
-          <div class="alert alert-warning small">Nenhuma conta conectada. Para este diagnóstico, vamos voltar ao <b>instagrapi</b> e ao acesso por <code>sessionid</code>.</div>
+          <div class="alert alert-warning small">Nenhuma conta conectada. Importe um <code>sessionid</code>. Após conectar, <b>Detector e Disparo começam pausados</b> para isolar a causa de qualquer logout.</div>
           <details class="border rounded p-3 mb-3" open>
             <summary class="fw-semibold" style="cursor:pointer">Importar sessionid do Chrome</summary>
             <div class="mt-3">

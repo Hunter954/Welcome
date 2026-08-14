@@ -39,6 +39,8 @@ SESSION_BACKUP_FILE = os.path.join(DATA_DIR, "instagram_session.backup.json")
 # de isolamento, mas não fica exposto no painel para evitar polling agressivo.
 DETECTOR_POLL_SECONDS = 60
 LATEST_FOLLOWERS_AMOUNT = 25
+APP_VERSION = "2026.08.14-instagrapi-clean-1"
+BOOT_ID = uuid.uuid4().hex[:8]
 
 LOGGER = logging.getLogger("instagram_automation")
 if not LOGGER.handlers:
@@ -142,6 +144,8 @@ def status():
         "session_saved": os.path.exists(SESSION_FILE),
         "auth_mode": get_setting("ig_auth_mode", "") or "sessionid",
         "library": "instagrapi",
+        "app_version": APP_VERSION,
+        "boot_id": BOOT_ID,
         "cooldown_until": get_setting("detector_cooldown_until", ""),
         "last_operation": get_setting("last_ig_operation", ""),
     }
@@ -282,6 +286,12 @@ def import_browser_session(raw):
         set_setting("ig_password_enc", "")
         set_setting("ig_auth_mode", "sessionid")
         set_setting("ig_connected", "true")
+        # Modo diagnóstico: uma sessão recém-importada não inicia leitura nem
+        # disparo automaticamente. Isso permite verificar se o simples bootstrap
+        # pelo sessionid já invalida a sessão antes de culpar detector/DM.
+        set_setting("detector_enabled", "false")
+        set_setting("sender_enabled", "false")
+        set_setting("welcome_enabled", "false")
         set_setting("last_error", "")
         set_setting("last_ig_operation", "sessionid_import")
         CLIENT = cl
@@ -429,7 +439,12 @@ def detect_followers(force_full=False):
 
         known_count = int(rows("SELECT COUNT(*) AS n FROM followers")[0]["n"])
         baseline = known_count == 0
-        amount = 0 if baseline or force_full else LATEST_FOLLOWERS_AMOUNT
+        # Nunca baixa a lista inteira automaticamente. A primeira execução usa
+        # apenas os mais recentes como baseline; isso evita uma requisição grande
+        # logo depois de importar a sessão.
+        amount = LATEST_FOLLOWERS_AMOUNT
+        if force_full:
+            amount = 0
 
         op_id = uuid.uuid4().hex[:8]
         _set_operation("detector")
@@ -615,6 +630,8 @@ def mark_pending_as_baseline():
 def detector_loop():
     log_event("INFO", "detector_started", "Detector iniciado", {
         "library": "instagrapi",
+        "app_version": APP_VERSION,
+        "boot_id": BOOT_ID,
         "poll_seconds": DETECTOR_POLL_SECONDS,
         "latest_amount": LATEST_FOLLOWERS_AMOUNT,
     })
@@ -629,7 +646,7 @@ def detector_loop():
 
 
 def sender_loop():
-    log_event("INFO", "sender_started", "Remetente iniciado", {"library": "instagrapi"})
+    log_event("INFO", "sender_started", "Remetente iniciado", {"library": "instagrapi", "app_version": APP_VERSION, "boot_id": BOOT_ID})
     while True:
         try:
             cfg = status()

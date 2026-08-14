@@ -1,91 +1,44 @@
-# Instagram Welcome Automation
+# Instagram Welcome — instagrapi
 
-Painel web em Flask + aiograpi para detectar seguidores novos e enviar uma DM de boas-vindas.
+Build: `2026.08.14-instagrapi-clean-1`
 
-## Como funciona
-
-1. Você entra no painel administrativo.
-2. Conecta a conta do Instagram com usuário/senha e, se necessário, 2FA.
-3. O sistema salva/reutiliza a sessão do aiograpi.
-4. Na primeira sincronização, todos os seguidores atuais viram a **base inicial** e não recebem mensagem.
-5. Nas sincronizações seguintes, IDs novos entram na fila e recebem a mensagem configurada.
-6. Há limite de DMs por hora e intervalo mínimo entre envios.
+Projeto Flask para diagnóstico controlado de automação de boas-vindas no Instagram usando `instagrapi==2.18.14`.
 
 ## Railway
 
-### 1. Crie um projeto e suba este repositório
-Conecte o GitHub ao Railway.
-
-### 2. Banco
-Recomendado: adicione PostgreSQL ao projeto e deixe o Railway injetar `DATABASE_URL`.
-
-### 3. Volume persistente
-Adicione um Volume e monte em:
-
-`/data`
-
-Isso preserva a sessão `instagram_session.json`. Sem volume, um redeploy pode apagar a sessão e causar novos logins/challenges.
-
-### 4. Variáveis
-Use o `.env.example` como referência:
-
-- `SECRET_KEY`: chave longa aleatória.
-- `ADMIN_USERNAME`: login do painel.
-- `ADMIN_PASSWORD`: senha do painel.
-- `DATABASE_URL`: fornecida pelo PostgreSQL do Railway.
-- `DATA_DIR=/data`
-- `FERNET_KEY`: opcional; chave Fernet para criptografar a senha. Se omitida, deriva de `SECRET_KEY`.
-- `POLL_SECONDS=90`
-- `MAX_DMS_PER_HOUR=12`
-- `MIN_DM_DELAY_SECONDS=25`
-- `WELCOME_ENABLED=false`
-
-### Gerar uma FERNET_KEY
-
-```bash
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-```
-
-## Desenvolvimento local
-
-```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\\Scripts\\activate
-pip install -r requirements.txt
-cp .env.example .env
-flask --app app.main run --debug
-```
-
-## Observações importantes
-
-- `aiograpi` é uma API privada/não oficial e assíncrona. Mudanças do Instagram podem quebrar login, seguidores ou Direct.
-- Use sessão persistente e evite trocar de IP/região constantemente.
-- Se aparecer challenge, abra o app oficial do Instagram, aprove o login e depois tente reconectar.
-- Comece com limites conservadores. Não use esta base para spam, listas compradas ou DMs em massa.
-- O worker é executado dentro do mesmo processo web. O `Procfile` fixa 1 worker para impedir dois loops enviando DMs duplicadas.
-
-
-## Sessão persistente e IP estável (aiograpi)
-
-O sistema salva a sessão completa do aiograpi em `${DATA_DIR}/instagram_session.json` e cria também `${DATA_DIR}/instagram_session.backup.json`. No Railway, mantenha um Volume montado no mesmo `DATA_DIR` (recomendado `/data`) para a sessão sobreviver aos deploys.
-
-Opcionalmente, você pode definir no Railway:
+Variáveis mínimas:
 
 ```env
-IG_PROXY_URL=http://usuario:senha@host:porta
+SECRET_KEY=...
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=...
+FERNET_KEY=...
+DATA_DIR=/data
+DATABASE_URL=...
 ```
 
-Use apenas um proxy estável confiável e mantenha o mesmo IP para a mesma conta. O valor não é exibido nos logs nem no painel; o painel mostra somente se ele está configurado. Se não usar proxy, deixe `IG_PROXY_URL` ausente.
+Mantenha um Volume montado em `/data`. O start command está definido em `railway.json` e `Procfile` com 1 worker.
 
-## Importar uma sessão já aberta no Chrome
+## Como testar sem misturar causas
 
-O painel também aceita uma sessão web já autenticada no `instagram.com`.
+1. Faça login no painel administrativo.
+2. Importe um `sessionid` válido do Chrome.
+3. A importação pausa automaticamente Detector, Disparo e automação.
+4. Observe se a sessão permanece válida sem nenhuma outra operação.
+5. Ative somente o Detector e observe os logs.
+6. Depois teste somente o Disparo.
 
-1. Abra o Instagram no Chrome na conta desejada.
-2. No painel da automação, abra **Importar sessão do Chrome**.
-3. Cole apenas o valor do cookie `sessionid`, um Cookie header completo, ou um JSON/.txt exportado dos cookies do `instagram.com`.
-4. Clique em **Validar e importar sessão**.
+O detector consulta no máximo os 25 seguidores mais recentes a cada 60 segundos. A primeira base também usa somente 25, evitando baixar a lista inteira logo após o login.
 
-O backend extrai somente o `sessionid` e chama `aiograpi.Client.login_by_sessionid()`. Se o Instagram aceitar a sessão na API privada, o sistema valida com `account_info()`, salva os settings persistentes em `/data/instagram_session.json` e guarda o `sessionid` criptografado apenas como fallback de restauração.
+## Confirmar qual deploy está ativo
 
-> Observação: uma sessão válida no navegador pode ser recusada pela API privada/mobile do Instagram. Nesse caso, o painel registra `browser_session_import_failed` com o tipo técnico do erro, sem expor o cookie nos logs.
+Abra `/health`. A resposta deve conter:
+
+```json
+{
+  "app_version": "2026.08.14-instagrapi-clean-1",
+  "library": "instagrapi"
+}
+```
+
+O mesmo build aparece no topo do painel. Se outro valor aparecer, o Railway ainda não está executando este código.
