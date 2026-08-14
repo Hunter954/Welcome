@@ -5,6 +5,7 @@ from flask import Flask, flash, redirect, render_template, request, session, url
 from .db import init_db, rows
 from .instagram_service import (
     clear_saved_session,
+    import_browser_session,
     login as ig_login,
     logout as ig_logout,
     mark_pending_as_baseline,
@@ -99,6 +100,21 @@ def instagram_2fa():
     return redirect(url_for("dashboard"))
 
 
+@app.post("/instagram/import-session")
+@admin_required
+def instagram_import_session():
+    raw = request.form.get("session_data", "")
+    uploaded = request.files.get("session_file")
+    if uploaded and uploaded.filename:
+        try:
+            raw = uploaded.read().decode("utf-8", errors="ignore")
+        except Exception:
+            pass
+    ok, msg = import_browser_session(raw)
+    flash(msg, "success" if ok else "danger")
+    return redirect(url_for("dashboard"))
+
+
 @app.post("/instagram/logout")
 @admin_required
 def instagram_disconnect():
@@ -122,6 +138,8 @@ def config():
         request.form.get("welcome_message", ""),
         request.form.get("welcome_enabled") == "on",
         request.form.get("excluded_usernames", ""),
+        request.form.get("detector_enabled") == "on",
+        request.form.get("sender_enabled") == "on",
     )
     flash("Configurações salvas.", "success")
     return redirect(url_for("dashboard"))
