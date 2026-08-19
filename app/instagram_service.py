@@ -37,7 +37,7 @@ SESSION_BACKUP_FILE = os.path.join(DATA_DIR, "instagram_session.backup.json")
 # de isolamento, mas não fica exposto no painel para evitar polling agressivo.
 DETECTOR_POLL_SECONDS = 60
 LATEST_FOLLOWERS_AMOUNT = 25
-APP_VERSION = "2026.08.14-instagrapi-clean-2"
+APP_VERSION = "2026.08.19-command-center-mvp"
 BOOT_ID = uuid.uuid4().hex[:8]
 
 LOGGER = logging.getLogger("instagram_automation")
@@ -665,3 +665,195 @@ def start_worker():
     WORKER_STARTED = True
     threading.Thread(target=detector_loop, daemon=True, name="instagram-detector").start()
     threading.Thread(target=sender_loop, daemon=True, name="instagram-sender").start()
+
+# --- Command Center extensions -------------------------------------------------
+def _model(obj):
+    if obj is None: return {}
+    if isinstance(obj, dict): return obj
+    if hasattr(obj, 'model_dump'):
+        try: return obj.model_dump(mode='json')
+        except Exception: pass
+    if hasattr(obj, 'dict'):
+        try: return obj.dict()
+        except Exception: pass
+    try: return vars(obj)
+    except Exception: return {'value': str(obj)}
+
+def sync_inbox(amount=30):
+    cl=_get_client()
+    if cl is None: return False, 'Conecte o Instagram primeiro.'
+    try:
+        _set_operation('inbox_sync')
+        with CLIENT_LOCK: threads=cl.direct_threads(amount=amount)
+        total=0
+        for t in threads or []:
+            d=_model(t); users=d.get('users') or []
+            other=users[0] if users else {}; other=_model(other)
+            items=d.get('messages') or d.get('items') or []
+            latest=items[0] if items else None; lm=_model(latest)
+            thread_id=str(d.get('id') or d.get('thread_id') or '')
+            if not thread_id: continue
+            username=other.get('username') or d.get('thread_title') or 'Instagram'
+            title=d.get('thread_title') or other.get('full_name') or username
+            text=lm.get('text') or lm.get('link_text') or lm.get('item_type') or ''
+            at=str(lm.get('timestamp') or lm.get('created_at') or '')
+            unread=1 if d.get('read_state') in (0,'0',False) else 0
+            raw=_safe_json(d)
+            if _is_postgres():
+                execute('INSERT INTO inbox_threads(thread_id,title,username,user_pk,avatar_url,last_message,last_message_at,unread,raw_json) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(thread_id) DO UPDATE SET title=EXCLUDED.title,username=EXCLUDED.username,user_pk=EXCLUDED.user_pk,avatar_url=EXCLUDED.avatar_url,last_message=EXCLUDED.last_message,last_message_at=EXCLUDED.last_message_at,unread=EXCLUDED.unread,raw_json=EXCLUDED.raw_json',(thread_id,title,username,str(other.get('pk') or ''),other.get('profile_pic_url') or '',text,at,unread,raw))
+            else:
+                execute('INSERT INTO inbox_threads(thread_id,title,username,user_pk,avatar_url,last_message,last_message_at,unread,raw_json) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(thread_id) DO UPDATE SET title=excluded.title,username=excluded.username,user_pk=excluded.user_pk,avatar_url=excluded.avatar_url,last_message=excluded.last_message,last_message_at=excluded.last_message_at,unread=excluded.unread,raw_json=excluded.raw_json',(thread_id,title,username,str(other.get('pk') or ''),other.get('profile_pic_url') or '',text,at,unread,raw))
+            if other.get('pk'):
+                if _is_postgres(): execute("INSERT INTO contacts(pk,username,full_name,avatar_url,source,first_contact,last_interaction) VALUES(?,?,?,?,?,?,?) ON CONFLICT(pk) DO UPDATE SET username=EXCLUDED.username,full_name=EXCLUDED.full_name,avatar_url=EXCLUDED.avatar_url,last_interaction=EXCLUDED.last_interaction",(str(other.get('pk')),username,other.get('full_name') or '',other.get('profile_pic_url') or '','Instagram Direct',utcnow(),utcnow()))
+                else: execute("INSERT INTO contacts(pk,username,full_name,avatar_url,source,first_contact,last_interaction) VALUES(?,?,?,?,?,?,?) ON CONFLICT(pk) DO UPDATE SET username=excluded.username,full_name=excluded.full_name,avatar_url=excluded.avatar_url,last_interaction=excluded.last_interaction",(str(other.get('pk')),username,other.get('full_name') or '',other.get('profile_pic_url') or '','Instagram Direct',utcnow(),utcnow()))
+            total+=1
+        log_event('INFO','inbox_sync_success',f'{total} conversas sincronizadas')
+        return True, f'{total} conversas sincronizadas.'
+    except Exception as e:
+        log_event('ERROR','inbox_sync_failed',f'{type(e).__name__}: {e}',_exception_details(e,cl,'inbox_sync')); return False, f'{type(e).__name__}: {e}'
+
+def sync_thread(thread_id):
+    cl=_get_client()
+    if cl is None: return False,'Conecte o Instagram primeiro.'
+    try:
+        with CLIENT_LOCK: t=cl.direct_thread(int(thread_id), amount=100)
+        d=_model(t); users=[_model(u) for u in (d.get('users') or [])]; lookup={str(u.get('pk')):u for u in users}
+        for item in (d.get('messages') or d.get('items') or []):
+            m=_model(item); iid=str(m.get('id') or m.get('item_id') or '')
+            if not iid: continue
+            upk=str(m.get('user_id') or '')
+            own=str(get_setting('ig_user_id',''))==upk
+            user=lookup.get(upk,{})
+            vals=(thread_id,iid,upk,user.get('username') or ('Você' if own else ''),'out' if own else 'in',m.get('item_type') or 'text',m.get('text') or m.get('link_text') or '',str(m.get('timestamp') or m.get('created_at') or ''),_safe_json(m))
+            inserted=False
+            try:
+                execute('INSERT INTO inbox_messages(thread_id,item_id,user_pk,username,direction,message_type,text,created_at,raw_json) VALUES(?,?,?,?,?,?,?,?,?)',vals); inserted=True
+            except Exception: pass
+            if inserted and not own and (m.get('text') or ''):
+                run_dm_automations(upk, user.get('username') or '', m.get('text') or '', thread_id)
+        execute('UPDATE inbox_threads SET unread=0 WHERE thread_id=?',(thread_id,)); return True,'Conversa atualizada.'
+    except Exception as e: return False,f'{type(e).__name__}: {e}'
+
+def send_thread_message(thread_id,text):
+    cl=_get_client(); text=(text or '').strip()
+    if not cl or not text: return False,'Mensagem inválida ou Instagram desconectado.'
+    try:
+        with CLIENT_LOCK: cl.direct_send(text, thread_ids=[int(thread_id)])
+        execute('INSERT INTO inbox_messages(thread_id,item_id,user_pk,username,direction,message_type,text,created_at,raw_json) VALUES(?,?,?,?,?,?,?,?,?)',(thread_id,'local-'+uuid.uuid4().hex,get_setting('ig_user_id',''),get_setting('ig_username',''),'out','text',text,utcnow(),'{}'))
+        execute('UPDATE inbox_threads SET last_message=?,last_message_at=? WHERE thread_id=?',(text,utcnow(),thread_id)); return True,'Mensagem enviada.'
+    except Exception as e: return False,f'{type(e).__name__}: {e}'
+
+def sync_media(amount=24):
+    cl=_get_client()
+    if not cl: return False,'Conecte o Instagram primeiro.'
+    try:
+        user_id=int(get_setting('ig_user_id','0')); _set_operation('media_sync')
+        with CLIENT_LOCK: medias=cl.user_medias(user_id, amount=amount)
+        for media in medias or []:
+            d=_model(media); pk=str(d.get('pk') or d.get('id') or '')
+            if not pk: continue
+            vals=(pk,str(d.get('media_type') or ''),d.get('product_type') or '',d.get('caption_text') or d.get('caption') or '',str(d.get('thumbnail_url') or ''),str(d.get('video_url') or d.get('media_url') or ''),str(d.get('taken_at') or ''),int(d.get('like_count') or 0),int(d.get('comment_count') or 0),_safe_json(d))
+            sql='INSERT INTO media_cache(pk,media_type,product_type,caption,thumbnail_url,media_url,taken_at,like_count,comment_count,raw_json) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(pk) DO UPDATE SET caption=excluded.caption,thumbnail_url=excluded.thumbnail_url,media_url=excluded.media_url,taken_at=excluded.taken_at,like_count=excluded.like_count,comment_count=excluded.comment_count,raw_json=excluded.raw_json'
+            if _is_postgres(): sql=sql.replace('excluded.','EXCLUDED.')
+            execute(sql,vals)
+        return True,f'{len(medias or [])} publicações sincronizadas.'
+    except Exception as e: return False,f'{type(e).__name__}: {e}'
+
+def sync_comments(media_pk, amount=50):
+    cl=_get_client()
+    if not cl: return False,'Conecte o Instagram primeiro.'
+    try:
+        with CLIENT_LOCK: comments=cl.media_comments(int(media_pk), amount=amount)
+        for c in comments or []:
+            d=_model(c); user=_model(d.get('user')); pk=str(d.get('pk') or d.get('id') or '')
+            if not pk: continue
+            vals=(pk,str(media_pk),str(user.get('pk') or d.get('user_id') or ''),user.get('username') or '',d.get('text') or '',str(d.get('created_at_utc') or d.get('created_at') or ''),0,_safe_json(d))
+            inserted=False
+            try:
+                execute('INSERT INTO comment_cache(pk,media_pk,user_pk,username,text,created_at,replied,raw_json) VALUES(?,?,?,?,?,?,?,?)',vals); inserted=True
+            except Exception: pass
+            if inserted:
+                run_comment_automations(media_pk, pk, vals[2], vals[3], vals[4])
+        return True,f'{len(comments or [])} comentários sincronizados.'
+    except Exception as e: return False,f'{type(e).__name__}: {e}'
+
+def reply_comment(comment_pk,text):
+    cl=_get_client(); text=(text or '').strip()
+    if not cl or not text: return False,'Resposta inválida.'
+    try:
+        comment=rows('SELECT media_pk FROM comment_cache WHERE pk=?',(str(comment_pk),))
+        if not comment: return False,'Comentário não encontrado no cache.'
+        with CLIENT_LOCK: cl.media_comment(int(comment[0]['media_pk']), text, replied_to_comment_id=int(comment_pk))
+        execute('UPDATE comment_cache SET replied=1 WHERE pk=?',(comment_pk,)); return True,'Comentário respondido.'
+    except Exception as e: return False,f'{type(e).__name__}: {e}'
+
+def publish_photo(file_path,caption=''):
+    cl=_get_client()
+    if not cl: return False,'Conecte o Instagram primeiro.',None
+    try:
+        with CLIENT_LOCK: media=cl.photo_upload(file_path, caption or '')
+        d=_model(media); return True,'Publicação enviada.',str(d.get('pk') or '')
+    except Exception as e: return False,f'{type(e).__name__}: {e}',None
+
+def _keyword_match(text, keyword, mode='contains'):
+    import unicodedata
+    def norm(v):
+        v=unicodedata.normalize('NFKD',(v or '').lower()); return ''.join(ch for ch in v if not unicodedata.combining(ch)).strip()
+    text=norm(text); keyword=norm(keyword)
+    if not keyword: return False
+    return text==keyword if mode=='equals' else keyword in text
+
+def _apply_tag_to_contact(user_pk, tag):
+    tag=(tag or '').strip()
+    if not user_pk or not tag: return
+    found=rows('SELECT tags FROM contacts WHERE pk=?',(str(user_pk),))
+    if not found: return
+    tags=[x.strip() for x in (found[0].get('tags') or '').split(',') if x.strip()]
+    if tag.lower() not in [x.lower() for x in tags]: tags.append(tag)
+    execute('UPDATE contacts SET tags=?,score=score+5,last_interaction=? WHERE pk=?',(', '.join(tags),utcnow(),str(user_pk)))
+
+def run_dm_automations(user_pk, username, text, thread_id=None):
+    cl=_get_client()
+    if not cl: return
+    truth='TRUE' if _is_postgres() else '1'
+    autos=rows(f"SELECT * FROM automations WHERE enabled={truth} AND trigger_type='dm_keyword' ORDER BY id ASC")
+    for a in autos:
+        if not _keyword_match(text,a.get('keyword'),a.get('match_mode')): continue
+        try:
+            if a.get('dm_text'):
+                
+                if thread_id:
+                    with CLIENT_LOCK: cl.direct_send(a['dm_text'], thread_ids=[int(thread_id)])
+                else:
+                    with CLIENT_LOCK: cl.direct_send(a['dm_text'], user_ids=[int(user_pk)])
+            _apply_tag_to_contact(user_pk,a.get('tag'))
+            execute('UPDATE automations SET executions=executions+1,updated_at=? WHERE id=?',(utcnow(),a['id']))
+            log_event('INFO','automation_executed',f"Automação {a['name']} executada para @{username}",{'automation_id':a['id'],'trigger':'dm_keyword'})
+        except Exception as e:
+            execute('UPDATE automations SET failures=failures+1,updated_at=? WHERE id=?',(utcnow(),a['id']))
+            log_event('ERROR','automation_failed',f"{a['name']}: {type(e).__name__}: {e}")
+
+def run_comment_automations(media_pk, comment_pk, user_pk, username, text):
+    cl=_get_client()
+    if not cl: return
+    truth='TRUE' if _is_postgres() else '1'
+    autos=rows(f"SELECT * FROM automations WHERE enabled={truth} AND trigger_type='comment_keyword' ORDER BY id ASC")
+    for a in autos:
+        if a.get('scope')=='media' and str(a.get('media_id'))!=str(media_pk): continue
+        if not _keyword_match(text,a.get('keyword'),a.get('match_mode')): continue
+        try:
+            if a.get('reply_text'):
+                with CLIENT_LOCK: cl.media_comment(int(media_pk), a['reply_text'], replied_to_comment_id=int(comment_pk))
+            if a.get('dm_text') and user_pk:
+                with CLIENT_LOCK: cl.direct_send(a['dm_text'],user_ids=[int(user_pk)])
+            if user_pk:
+                found=rows('SELECT pk FROM contacts WHERE pk=?',(str(user_pk),))
+                if not found:
+                    execute('INSERT INTO contacts(pk,username,full_name,status,score,tags,source,first_contact,last_interaction) VALUES(?,?,?,?,?,?,?,?,?)',(str(user_pk),username,'','lead',5,a.get('tag') or '','Comentário',utcnow(),utcnow()))
+                else: _apply_tag_to_contact(user_pk,a.get('tag'))
+            execute('UPDATE automations SET executions=executions+1,updated_at=? WHERE id=?',(utcnow(),a['id']))
+            execute('UPDATE comment_cache SET replied=1 WHERE pk=?',(str(comment_pk),))
+            log_event('INFO','automation_executed',f"Automação {a['name']} executada para @{username}",{'automation_id':a['id'],'trigger':'comment_keyword','media_pk':str(media_pk)})
+        except Exception as e:
+            execute('UPDATE automations SET failures=failures+1,updated_at=? WHERE id=?',(utcnow(),a['id']))
+            log_event('ERROR','automation_failed',f"{a['name']}: {type(e).__name__}: {e}")

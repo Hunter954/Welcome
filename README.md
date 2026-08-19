@@ -42,3 +42,18 @@ Abra `/health`. A resposta deve conter:
 ```
 
 O mesmo build aparece no topo do painel. Se outro valor aparecer, o Railway ainda não está executando este código.
+
+## Command Center MVP — 19/08/2026
+
+O painel foi ampliado mantendo a integração `instagrapi` e a automação original de novos seguidores. Novos módulos:
+
+- Dashboard executivo com métricas e atividade.
+- Inbox sincronizável, leitura de threads, envio manual e respostas rápidas.
+- CRM de contatos com status, score, tags, notas, telefone, e-mail e atendente.
+- Automações por palavra em comentário e Direct, com resposta, DM e tag.
+- Central de comentários por publicação.
+- Conteúdo: sincronização do feed e publicação de imagem.
+- Logs técnicos em tela separada.
+- Configurações da sessão e boas-vindas preservadas.
+
+As sincronizações de Inbox, conteúdo e comentários são explícitas no painel para evitar polling excessivo em endpoints privados. As automações de palavra-chave são processadas quando os itens novos são sincronizados; a automação de novos seguidores continua no worker original.

@@ -1,183 +1,161 @@
-import os
+import os, uuid
 from functools import wraps
+from pathlib import Path
 from flask import Flask, flash, redirect, render_template, request, session, url_for
+from werkzeug.utils import secure_filename
 
-from .db import init_db, rows
+from .db import init_db, rows, execute, utcnow, _is_postgres
 from .instagram_service import (
-    clear_saved_session,
-    import_browser_session,
-    login as ig_login,
-    logout as ig_logout,
-    mark_pending_as_baseline,
-    save_config,
-    send_test_dm,
-    start_worker,
-    status,
-    sync_once,
-    APP_VERSION,
-    BOOT_ID,
+ clear_saved_session, import_browser_session, login as ig_login, logout as ig_logout,
+ mark_pending_as_baseline, save_config, send_test_dm, start_worker, status, sync_once,
+ sync_inbox, sync_thread, send_thread_message, sync_media, sync_comments, reply_comment,
+ publish_photo, APP_VERSION, BOOT_ID,
 )
 
-app = Flask(__name__)
-app.secret_key = os.getenv("SECRET_KEY", "change-me-now")
-init_db()
-start_worker()
-
+app=Flask(__name__); app.secret_key=os.getenv('SECRET_KEY','change-me-now')
+UPLOAD_DIR=os.path.join(os.getenv('DATA_DIR',os.path.join(os.getcwd(),'data')),'uploads'); Path(UPLOAD_DIR).mkdir(parents=True,exist_ok=True)
+init_db(); start_worker()
 
 def admin_required(fn):
-    @wraps(fn)
-    def wrapper(*args, **kwargs):
-        if not session.get("admin"):
-            return redirect(url_for("admin_login"))
-        return fn(*args, **kwargs)
-    return wrapper
+ @wraps(fn)
+ def wrapper(*args,**kwargs):
+  if not session.get('admin'): return redirect(url_for('admin_login'))
+  return fn(*args,**kwargs)
+ return wrapper
 
+def common(active): return {'cfg':status(),'active':active}
+def count(sql,params=()):
+ try: return int(rows(sql,params)[0]['n'])
+ except Exception: return 0
 
-@app.get("/health")
-def health():
-    return {
-        "ok": True,
-        "app_version": APP_VERSION,
-        "boot_id": BOOT_ID,
-        "library": "instagrapi",
-        "git_commit": os.getenv("RAILWAY_GIT_COMMIT_SHA", "")[:12],
-    }, 200
+@app.get('/health')
+def health(): return {'ok':True,'app_version':APP_VERSION,'boot_id':BOOT_ID,'library':'instagrapi'},200
 
-
-@app.route("/login", methods=["GET", "POST"])
+@app.route('/login',methods=['GET','POST'])
 def admin_login():
-    if request.method == "POST":
-        u = request.form.get("username", "")
-        p = request.form.get("password", "")
-        if u == os.getenv("ADMIN_USERNAME", "admin") and p == os.getenv("ADMIN_PASSWORD", "admin"):
-            session["admin"] = True
-            return redirect(url_for("dashboard"))
-        flash("Login administrativo inválido.", "danger")
-    return render_template("admin_login.html")
+ if request.method=='POST':
+  if request.form.get('username','')==os.getenv('ADMIN_USERNAME','admin') and request.form.get('password','')==os.getenv('ADMIN_PASSWORD','admin'):
+   session['admin']=True; return redirect(url_for('dashboard'))
+  flash('Login administrativo inválido.','danger')
+ return render_template('admin_login.html')
+@app.get('/logout')
+def admin_logout(): session.clear(); return redirect(url_for('admin_login'))
 
-
-@app.get("/logout")
-def admin_logout():
-    session.clear()
-    return redirect(url_for("admin_login"))
-
-
-@app.get("/")
+@app.get('/')
 @admin_required
 def dashboard():
-    cfg = status()
-    logs = rows("SELECT * FROM dm_log ORDER BY id DESC LIMIT 30")
-    diagnostic_logs = rows("SELECT * FROM app_log ORDER BY id DESC LIMIT 60")
-    followers = rows("SELECT * FROM followers ORDER BY first_seen DESC LIMIT 30")
-    from .db import _is_postgres
-    pending_sql = "SELECT COUNT(*) AS n FROM followers WHERE welcomed=FALSE" if _is_postgres() else "SELECT COUNT(*) AS n FROM followers WHERE welcomed=0"
-    welcomed_sql = "SELECT COUNT(*) AS n FROM followers WHERE welcomed=TRUE" if _is_postgres() else "SELECT COUNT(*) AS n FROM followers WHERE welcomed=1"
-    counts = {
-        "followers": rows("SELECT COUNT(*) AS n FROM followers")[0]["n"],
-        "welcomed": rows(welcomed_sql)[0]["n"],
-        "pending": rows(pending_sql)[0]["n"],
-        "sent": rows("SELECT COUNT(*) AS n FROM dm_log WHERE status='sent'")[0]["n"],
-        "errors": rows("SELECT COUNT(*) AS n FROM dm_log WHERE status='error'")[0]["n"],
-        "tests": rows("SELECT COUNT(*) AS n FROM dm_log WHERE status='test'")[0]["n"],
-    }
-    return render_template("dashboard.html", cfg=cfg, logs=logs, diagnostic_logs=diagnostic_logs, followers=followers, counts=counts)
+ ctx=common('dashboard');
+ ctx.update(counts={'followers':count('SELECT COUNT(*) AS n FROM followers'),'sent':count("SELECT COUNT(*) AS n FROM dm_log WHERE status='sent'"),'contacts':count('SELECT COUNT(*) AS n FROM contacts'),'unread':count('SELECT COUNT(*) AS n FROM inbox_threads WHERE unread=1'),'automations':count('SELECT COUNT(*) AS n FROM automations'),'posts':count('SELECT COUNT(*) AS n FROM media_cache')},
+ recent=rows('SELECT * FROM app_log ORDER BY id DESC LIMIT 8'), automations=rows('SELECT * FROM automations ORDER BY id DESC LIMIT 5'), threads=rows('SELECT * FROM inbox_threads ORDER BY last_message_at DESC LIMIT 5'))
+ return render_template('dashboard.html',**ctx)
 
+@app.route('/inbox')
+@admin_required
+def inbox():
+ thread_id=request.args.get('thread'); ctx=common('inbox'); threads=rows('SELECT * FROM inbox_threads ORDER BY last_message_at DESC LIMIT 100'); messages=[]; contact=None
+ if thread_id:
+  messages=rows('SELECT * FROM inbox_messages WHERE thread_id=? ORDER BY created_at ASC',(thread_id,)); t=rows('SELECT * FROM inbox_threads WHERE thread_id=?',(thread_id,));
+  if t and t[0].get('user_pk'): c=rows('SELECT * FROM contacts WHERE pk=?',(t[0]['user_pk'],)); contact=c[0] if c else None
+ ctx.update(threads=threads,messages=messages,thread_id=thread_id,contact=contact,quick=rows('SELECT * FROM quick_replies ORDER BY shortcut'))
+ return render_template('inbox.html',**ctx)
+@app.post('/inbox/sync')
+@admin_required
+def inbox_sync_route(): ok,msg=sync_inbox(); flash(msg,'success' if ok else 'danger'); return redirect(url_for('inbox'))
+@app.post('/inbox/<thread_id>/sync')
+@admin_required
+def thread_sync_route(thread_id): ok,msg=sync_thread(thread_id); flash(msg,'success' if ok else 'danger'); return redirect(url_for('inbox',thread=thread_id))
+@app.post('/inbox/<thread_id>/send')
+@admin_required
+def thread_send_route(thread_id): ok,msg=send_thread_message(thread_id,request.form.get('message')); flash(msg,'success' if ok else 'danger'); return redirect(url_for('inbox',thread=thread_id))
 
-@app.route("/instagram/login", methods=["POST"])
+@app.get('/contacts')
+@admin_required
+def contacts(): return render_template('contacts.html',**common('contacts'),contacts=rows('SELECT * FROM contacts ORDER BY last_interaction DESC LIMIT 300'))
+@app.post('/contacts/<pk>')
+@admin_required
+def contact_update(pk):
+ execute('UPDATE contacts SET status=?,tags=?,notes=?,phone=?,email=?,company=?,city=?,assigned_to=?,score=? WHERE pk=?',(request.form.get('status','lead'),request.form.get('tags',''),request.form.get('notes',''),request.form.get('phone',''),request.form.get('email',''),request.form.get('company',''),request.form.get('city',''),request.form.get('assigned_to',''),int(request.form.get('score') or 0),pk)); flash('Contato atualizado.','success'); return redirect(url_for('contacts'))
+
+@app.route('/automations',methods=['GET','POST'])
+@admin_required
+def automations():
+ if request.method=='POST':
+  now=utcnow(); execute('INSERT INTO automations(name,trigger_type,keyword,match_mode,scope,media_id,reply_text,dm_text,tag,enabled,executions,failures,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(request.form.get('name') or 'Nova automação',request.form.get('trigger_type','comment_keyword'),request.form.get('keyword',''),request.form.get('match_mode','contains'),request.form.get('scope','all'),request.form.get('media_id',''),request.form.get('reply_text',''),request.form.get('dm_text',''),request.form.get('tag',''),True if _is_postgres() else 1,0,0,now,now)); flash('Automação criada.','success'); return redirect(url_for('automations'))
+ return render_template('automations.html',**common('automations'),automations=rows('SELECT * FROM automations ORDER BY id DESC'))
+@app.post('/automations/<int:aid>/toggle')
+@admin_required
+def automation_toggle(aid):
+ a=rows('SELECT enabled FROM automations WHERE id=?',(aid,));
+ if a: execute('UPDATE automations SET enabled=?,updated_at=? WHERE id=?',((not bool(a[0]['enabled'])) if _is_postgres() else (0 if a[0]['enabled'] else 1),utcnow(),aid))
+ return redirect(url_for('automations'))
+@app.post('/automations/<int:aid>/delete')
+@admin_required
+def automation_delete(aid): execute('DELETE FROM automations WHERE id=?',(aid,)); flash('Automação removida.','warning'); return redirect(url_for('automations'))
+
+@app.get('/comments')
+@admin_required
+def comments(): return render_template('comments.html',**common('comments'),comments=rows('SELECT c.*,m.caption,m.thumbnail_url FROM comment_cache c LEFT JOIN media_cache m ON m.pk=c.media_pk ORDER BY c.created_at DESC LIMIT 300'),medias=rows('SELECT * FROM media_cache ORDER BY taken_at DESC LIMIT 50'))
+@app.post('/comments/sync/<media_pk>')
+@admin_required
+def comments_sync_route(media_pk): ok,msg=sync_comments(media_pk); flash(msg,'success' if ok else 'danger'); return redirect(url_for('comments'))
+@app.post('/comments/<comment_pk>/reply')
+@admin_required
+def comment_reply_route(comment_pk): ok,msg=reply_comment(comment_pk,request.form.get('text')); flash(msg,'success' if ok else 'danger'); return redirect(url_for('comments'))
+
+@app.get('/content')
+@admin_required
+def content(): return render_template('content.html',**common('content'),medias=rows('SELECT * FROM media_cache ORDER BY taken_at DESC LIMIT 100'),scheduled=rows('SELECT * FROM scheduled_posts ORDER BY id DESC LIMIT 30'))
+@app.post('/content/sync')
+@admin_required
+def content_sync_route(): ok,msg=sync_media(); flash(msg,'success' if ok else 'danger'); return redirect(url_for('content'))
+@app.post('/content/publish')
+@admin_required
+def content_publish_route():
+ f=request.files.get('image'); caption=request.form.get('caption','')
+ if not f or not f.filename: flash('Selecione uma imagem.','danger'); return redirect(url_for('content'))
+ name=f'{uuid.uuid4().hex}_{secure_filename(f.filename)}'; path=os.path.join(UPLOAD_DIR,name); f.save(path)
+ ok,msg,pk=publish_photo(path,caption); execute('INSERT INTO scheduled_posts(kind,file_path,caption,status,scheduled_at,published_media_pk,error,created_at) VALUES(?,?,?,?,?,?,?,?)',('photo',path,caption,'published' if ok else 'error',None,pk or '',None if ok else msg,utcnow())); flash(msg,'success' if ok else 'danger'); return redirect(url_for('content'))
+
+@app.get('/logs')
+@admin_required
+def logs(): return render_template('logs.html',**common('logs'),logs=rows('SELECT * FROM app_log ORDER BY id DESC LIMIT 300'),dms=rows('SELECT * FROM dm_log ORDER BY id DESC LIMIT 100'))
+@app.get('/settings')
+@admin_required
+def settings(): return render_template('settings.html',**common('settings'))
+
+# Existing Instagram/session/welcome endpoints
+@app.post('/instagram/login')
 @admin_required
 def instagram_login():
-    username = request.form.get("username", "").strip()
-    ok, msg = ig_login(username, request.form.get("password", ""), request.form.get("verification_code") or None)
-    if msg == "2FA_REQUIRED":
-        session["pending_ig_user"] = username
-        session["pending_ig_pass"] = request.form.get("password", "")
-        flash("Sua conta usa autenticação em 2 fatores. Digite o código e conecte novamente.", "warning")
-        return redirect(url_for("dashboard", twofa="1"))
-    flash(msg, "success" if ok else "danger")
-    return redirect(url_for("dashboard"))
-
-
-@app.post("/instagram/2fa")
+ u=request.form.get('username','').strip(); ok,msg=ig_login(u,request.form.get('password',''),request.form.get('verification_code') or None)
+ if msg=='2FA_REQUIRED': session['pending_ig_user']=u; session['pending_ig_pass']=request.form.get('password',''); flash('Digite o código 2FA.','warning')
+ else: flash(msg,'success' if ok else 'danger')
+ return redirect(url_for('settings'))
+@app.post('/instagram/2fa')
 @admin_required
-def instagram_2fa():
-    user = session.pop("pending_ig_user", "")
-    password = session.pop("pending_ig_pass", "")
-    code = request.form.get("verification_code", "").strip()
-    ok, msg = ig_login(user, password, code)
-    flash(msg, "success" if ok else "danger")
-    return redirect(url_for("dashboard"))
-
-
-@app.post("/instagram/import-session")
+def instagram_2fa(): ok,msg=ig_login(session.pop('pending_ig_user',''),session.pop('pending_ig_pass',''),request.form.get('verification_code','').strip()); flash(msg,'success' if ok else 'danger'); return redirect(url_for('settings'))
+@app.post('/instagram/import-session')
 @admin_required
 def instagram_import_session():
-    raw = request.form.get("session_data", "")
-    uploaded = request.files.get("session_file")
-    if uploaded and uploaded.filename:
-        try:
-            raw = uploaded.read().decode("utf-8", errors="ignore")
-        except Exception:
-            pass
-    ok, msg = import_browser_session(raw)
-    flash(msg, "success" if ok else "danger")
-    return redirect(url_for("dashboard"))
-
-
-@app.post("/instagram/logout")
+ raw=request.form.get('session_data',''); up=request.files.get('session_file')
+ if up and up.filename: raw=up.read().decode('utf-8',errors='ignore')
+ ok,msg=import_browser_session(raw); flash(msg,'success' if ok else 'danger'); return redirect(url_for('settings'))
+@app.post('/instagram/logout')
 @admin_required
-def instagram_disconnect():
-    ig_logout()
-    flash("Conta do Instagram desconectada.", "success")
-    return redirect(url_for("dashboard"))
-
-
-@app.post("/instagram/clear-session")
+def instagram_disconnect(): ig_logout(); flash('Instagram desconectado.','success'); return redirect(url_for('settings'))
+@app.post('/instagram/clear-session')
 @admin_required
-def instagram_clear_session():
-    removed = clear_saved_session()
-    flash("Sessão salva apagada. Faça um login limpo agora." if removed else "Não havia arquivo de sessão salvo; o próximo login já será limpo.", "warning")
-    return redirect(url_for("dashboard"))
-
-
-@app.post("/config")
+def instagram_clear_session(): clear_saved_session(); flash('Sessão persistente removida.','warning'); return redirect(url_for('settings'))
+@app.post('/config')
 @admin_required
-def config():
-    save_config(
-        request.form.get("welcome_message", ""),
-        request.form.get("welcome_enabled") == "on",
-        request.form.get("excluded_usernames", ""),
-        request.form.get("detector_enabled") == "on",
-        request.form.get("sender_enabled") == "on",
-    )
-    flash("Configurações salvas.", "success")
-    return redirect(url_for("dashboard"))
-
-
-@app.post("/sync")
+def config(): save_config(request.form.get('welcome_message',''),request.form.get('welcome_enabled')=='on',request.form.get('excluded_usernames',''),request.form.get('detector_enabled')=='on',request.form.get('sender_enabled')=='on'); flash('Configurações salvas.','success'); return redirect(url_for('settings'))
+@app.post('/sync')
 @admin_required
 def sync():
-    result = sync_once(send_messages=True)
-    if result.get("ok"):
-        if result.get("baseline"):
-            flash(f"Base inicial criada com {result['total']} seguidores. Ninguém antigo recebeu DM.", "success")
-        else:
-            flash(f"Sincronização concluída: {result['new']} novos, {result['sent']} DMs enviadas, {result['errors']} erros.", "success")
-    else:
-        flash(result.get("message", "Falha na sincronização."), "danger")
-    return redirect(url_for("dashboard"))
-
-
-@app.post("/instagram/test-dm")
+ r=sync_once(send_messages=True); flash(f"Sincronização: {r.get('new',0)} novos, {r.get('sent',0)} DMs." if r.get('ok') else r.get('message','Falha.'),'success' if r.get('ok') else 'danger'); return redirect(request.referrer or url_for('dashboard'))
+@app.post('/instagram/test-dm')
 @admin_required
-def instagram_test_dm():
-    ok, msg = send_test_dm(request.form.get("test_username", ""), request.form.get("test_message", "") or None)
-    flash(msg, "success" if ok else "danger")
-    return redirect(url_for("dashboard", tab="automation"))
-
-
-@app.post("/followers/mark-baseline")
+def instagram_test_dm(): ok,msg=send_test_dm(request.form.get('test_username',''),request.form.get('test_message','') or None); flash(msg,'success' if ok else 'danger'); return redirect(url_for('settings'))
+@app.post('/followers/mark-baseline')
 @admin_required
-def followers_mark_baseline():
-    count = mark_pending_as_baseline()
-    flash(f"{count} seguidores pendentes foram marcados como base e não receberão boas-vindas.", "warning")
-    return redirect(url_for("dashboard", tab="queue"))
+def followers_mark_baseline(): flash(f'{mark_pending_as_baseline()} seguidores marcados como base.','warning'); return redirect(url_for('settings'))
