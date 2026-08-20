@@ -57,3 +57,49 @@ O painel foi ampliado mantendo a integração `instagrapi` e a automação origi
 - Configurações da sessão e boas-vindas preservadas.
 
 As sincronizações de Inbox, conteúdo e comentários são explícitas no painel para evitar polling excessivo em endpoints privados. As automações de palavra-chave são processadas quando os itens novos são sincronizados; a automação de novos seguidores continua no worker original.
+
+## Meta API oficial + multi-conta (V2)
+
+Esta build mantém o provider legado `instagrapi`, mas adiciona a arquitetura oficial para produção:
+
+- OAuth via **Instagram API with Instagram Login**;
+- várias contas Business/Creator na mesma aplicação Welcome;
+- token separado e criptografado por conta;
+- seletor de conta no painel;
+- webhook central em `/webhooks/instagram`;
+- DMs recebidas gravadas no Inbox automaticamente;
+- atualização do Inbox em tempo real sem consultar o Instagram a cada refresh;
+- envio de resposta pelo endpoint oficial `/<IG_ID>/messages`;
+- automações de palavra-chave de DM isoladas por conta;
+- provider legado preservado para a automação experimental de novos seguidores.
+
+### Variáveis Railway
+
+```env
+META_APP_ID=...
+META_APP_SECRET=...
+META_REDIRECT_URI=https://SEU-DOMINIO/meta/callback
+META_WEBHOOK_VERIFY_TOKEN=uma-chave-forte-que-voce-inventa
+META_GRAPH_VERSION=v26.0
+META_VERIFY_SIGNATURE=1
+```
+
+Mantenha também `SECRET_KEY` e, de preferência, defina `FERNET_KEY` para criptografia dos tokens. Se `FERNET_KEY` não for informado, o projeto deriva a chave de `SECRET_KEY`.
+
+### Configuração no painel da Meta
+
+1. Crie/abra seu App da Meta e adicione a configuração da Instagram API com Instagram Login.
+2. Cadastre exatamente a Redirect URI usada em `META_REDIRECT_URI`.
+3. Configure o Callback URL do webhook como `https://SEU-DOMINIO/webhooks/instagram`.
+4. Use em Verify Token exatamente o valor de `META_WEBHOOK_VERIFY_TOKEN`.
+5. Assine os campos necessários no painel de Webhooks, principalmente `messages`, além dos eventos de comentários/messaging usados pelo seu produto.
+6. Solicite/ative as permissões necessárias para o app, como `instagram_business_basic`, `instagram_business_manage_messages`, `instagram_business_manage_comments` e `instagram_business_content_publish`, de acordo com os módulos que serão colocados em produção.
+7. No Welcome, abra **Configurações > Conectar Instagram** e autorize cada conta profissional.
+
+### Tempo real
+
+O navegador do painel não faz polling na conta do Instagram. A Meta chama o webhook quando uma DM chega; o Welcome salva o evento e a interface consulta apenas o próprio backend a cada 2 segundos para refletir eventos novos. Assim não há o botão “forçar atualização” no fluxo oficial e não são feitas consultas repetitivas à conta para descobrir mensagens.
+
+### Observação sobre novo seguidor
+
+O gatilho original `novo seguidor -> DM` continua isolado no provider legado. Não foi misturado ao webhook oficial de mensagens, evitando tratar esse gatilho como se fosse garantido universalmente pela API pública.

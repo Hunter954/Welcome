@@ -41,12 +41,24 @@ def init_db():
       '''CREATE TABLE IF NOT EXISTS media_cache (pk TEXT PRIMARY KEY,media_type TEXT,product_type TEXT,caption TEXT,thumbnail_url TEXT,media_url TEXT,taken_at TEXT,like_count INTEGER DEFAULT 0,comment_count INTEGER DEFAULT 0,raw_json TEXT DEFAULT '')''',
       '''CREATE TABLE IF NOT EXISTS comment_cache (pk TEXT PRIMARY KEY,media_pk TEXT,user_pk TEXT,username TEXT,text TEXT,created_at TEXT,replied INTEGER DEFAULT 0,raw_json TEXT DEFAULT '')''',
       f'''CREATE TABLE IF NOT EXISTS scheduled_posts (id {serial},kind TEXT DEFAULT 'photo',file_path TEXT,caption TEXT,status TEXT DEFAULT 'draft',scheduled_at TEXT,published_media_pk TEXT,error TEXT,created_at TEXT NOT NULL)''',
+      '''CREATE TABLE IF NOT EXISTS instagram_accounts (account_id TEXT PRIMARY KEY,ig_user_id TEXT UNIQUE,username TEXT,display_name TEXT DEFAULT '',avatar_url TEXT DEFAULT '',token_enc TEXT DEFAULT '',expires_at TEXT,provider TEXT DEFAULT 'meta',connected_at TEXT,last_webhook_at TEXT,status TEXT DEFAULT 'connected')''',
+      f'''CREATE TABLE IF NOT EXISTS realtime_events (id {serial},account_id TEXT NOT NULL,event_type TEXT NOT NULL,payload TEXT DEFAULT '',created_at TEXT NOT NULL)''',
     ]
     with conn() as c:
       cur=c.cursor(); lock=684731920114
       if _is_postgres(): cur.execute('SELECT pg_advisory_lock(%s)',(lock,))
       try:
         for sql in schemas: cur.execute(sql)
+        # Backward-compatible migrations for databases created by older Welcome builds.
+        migrations=[
+          "ALTER TABLE automations ADD COLUMN account_id TEXT DEFAULT ''",
+          "ALTER TABLE media_cache ADD COLUMN account_id TEXT DEFAULT ''",
+          "ALTER TABLE comment_cache ADD COLUMN account_id TEXT DEFAULT ''",
+          "ALTER TABLE scheduled_posts ADD COLUMN account_id TEXT DEFAULT ''",
+        ]
+        for migration in migrations:
+          try: cur.execute(migration)
+          except Exception: pass
         defaults=[('/preco','Preço','Olá! Posso te passar os valores e entender o que você precisa 👇'),('/whatsapp','WhatsApp','Claro! Me passa seu WhatsApp com DDD e continuamos por lá.'),('/portfolio','Portfólio','Separei nosso portfólio para você. Quer que eu te indique os cases mais parecidos com o seu projeto?')]
         for shortcut,title,msg in defaults:
           try:

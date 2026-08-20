@@ -1,22 +1,27 @@
 <!doctype html><html lang="pt-br"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{ title or 'Welcome Command Center' }}</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet"><link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}"></head><body>
 {% if session.get('admin') %}
 <div class="app-shell">
-<aside class="sidebar"><a class="brand" href="{{ url_for('dashboard') }}"><span class="brand-icon"><i class="bi bi-instagram"></i></span><span>Welcome</span></a><div class="account-pill"><span class="avatar-dot">{{ (cfg.username or 'IG')[0]|upper }}</span><div><b>@{{ cfg.username or 'instagram' }}</b><small>{{ 'Conectada' if cfg.connected else 'Desconectada' }}</small></div><span class="online {{ 'on' if cfg.connected else '' }}"></span></div>
+<aside class="sidebar"><a class="brand" href="{{ url_for('dashboard') }}"><span class="brand-icon"><i class="bi bi-instagram"></i></span><span>Welcome</span></a>
+<div class="account-pill account-switcher"><span class="avatar-dot">{{ (cfg.username or 'IG')[0]|upper }}</span><div class="grow"><b>@{{ cfg.username or 'instagram' }}</b><small>{{ 'Meta API oficial' if cfg.provider=='meta' else ('Sessão conectada' if cfg.connected else 'Desconectada') }}</small></div><span class="online {{ 'on' if cfg.connected else '' }}"></span></div>
+{% if accounts or legacy_cfg.connected %}<form class="account-select-form" method="post" action="{{ url_for('account_switch') }}"><select name="account_id" onchange="this.form.submit()">{% if legacy_cfg.connected %}<option value="legacy" {% if not active_account %}selected{% endif %}>@{{ legacy_cfg.username }} · Legacy</option>{% endif %}{% for a in accounts if a.status=='connected' %}<option value="{{ a.account_id }}" {% if active_account and active_account.account_id==a.account_id %}selected{% endif %}>@{{ a.username }} · Meta</option>{% endfor %}</select></form>{% endif %}
 <nav class="side-nav">
 <a class="{{ 'active' if active=='dashboard' }}" href="{{ url_for('dashboard') }}"><i class="bi bi-grid-1x2"></i><span>Dashboard</span></a>
-<a class="{{ 'active' if active=='inbox' }}" href="{{ url_for('inbox') }}"><i class="bi bi-chat-left-text"></i><span>Inbox</span></a>
+<a class="{{ 'active' if active=='inbox' }}" href="{{ url_for('inbox') }}"><i class="bi bi-chat-left-text"></i><span>Inbox</span><em id="live-badge" class="live-badge" hidden></em></a>
 <a class="{{ 'active' if active=='contacts' }}" href="{{ url_for('contacts') }}"><i class="bi bi-people"></i><span>Contatos</span></a>
-<div class="nav-label">AUTOMAÇÃO</div>
-<a class="{{ 'active' if active=='automations' }}" href="{{ url_for('automations') }}"><i class="bi bi-lightning-charge"></i><span>Automações</span></a>
-<a class="{{ 'active' if active=='comments' }}" href="{{ url_for('comments') }}"><i class="bi bi-chat-square-dots"></i><span>Comentários</span></a>
-<div class="nav-label">CONTEÚDO</div>
-<a class="{{ 'active' if active=='content' }}" href="{{ url_for('content') }}"><i class="bi bi-images"></i><span>Conteúdo</span></a>
-<div class="nav-label">SISTEMA</div>
-<a class="{{ 'active' if active=='logs' }}" href="{{ url_for('logs') }}"><i class="bi bi-activity"></i><span>Logs</span></a>
-<a class="{{ 'active' if active=='settings' }}" href="{{ url_for('settings') }}"><i class="bi bi-sliders"></i><span>Configurações</span></a>
+<div class="nav-label">AUTOMAÇÃO</div><a class="{{ 'active' if active=='automations' }}" href="{{ url_for('automations') }}"><i class="bi bi-lightning-charge"></i><span>Automações</span></a><a class="{{ 'active' if active=='comments' }}" href="{{ url_for('comments') }}"><i class="bi bi-chat-square-dots"></i><span>Comentários</span></a>
+<div class="nav-label">CONTEÚDO</div><a class="{{ 'active' if active=='content' }}" href="{{ url_for('content') }}"><i class="bi bi-images"></i><span>Conteúdo</span></a>
+<div class="nav-label">SISTEMA</div><a class="{{ 'active' if active=='logs' }}" href="{{ url_for('logs') }}"><i class="bi bi-activity"></i><span>Logs</span></a><a class="{{ 'active' if active=='settings' }}" href="{{ url_for('settings') }}"><i class="bi bi-sliders"></i><span>Configurações</span></a>
 </nav><div class="sidebar-bottom"><a href="{{ url_for('admin_logout') }}"><i class="bi bi-box-arrow-left"></i> Sair</a></div></aside>
-<div class="main-wrap"><header class="topbar"><button class="mobile-menu" onclick="document.body.classList.toggle('menu-open')"><i class="bi bi-list"></i></button><div class="top-title">Instagram Command Center</div><div class="top-actions"><span class="status-chip {{ 'connected' if cfg.connected }}"><span></span>{{ '@'+cfg.username if cfg.connected else 'Instagram offline' }}</span></div></header><main class="content-wrap">
+<div class="main-wrap"><header class="topbar"><button class="mobile-menu" onclick="document.body.classList.toggle('menu-open')"><i class="bi bi-list"></i></button><div class="top-title">Instagram Command Center</div><div class="top-actions"><span id="realtime-chip" class="status-chip {{ 'connected' if cfg.connected }}"><span></span>{{ '@'+cfg.username if cfg.connected else 'Instagram offline' }}</span></div></header><main class="content-wrap">
 {% with messages=get_flashed_messages(with_categories=true) %}{% for category,message in messages %}<div class="alert alert-{{ category }} border-0 shadow-sm">{{ message }}</div>{% endfor %}{% endwith %}{% block content %}{% endblock %}
 </main></div></div>
 {% else %}<main>{% block guest %}{% endblock %}</main>{% endif %}
-<script>document.addEventListener('click',e=>{if(e.target.closest('.sidebar a'))document.body.classList.remove('menu-open')});</script></body></html>
+<script>
+document.addEventListener('click',e=>{if(e.target.closest('.sidebar a'))document.body.classList.remove('menu-open')});
+{% if session.get('admin') and active_account %}
+(()=>{let last=Number(localStorage.getItem('welcome_live_{{ active_account.account_id }}')||0), unread=0;
+ async function tick(){try{const r=await fetch('{{ url_for("live_events") }}?after='+last,{cache:'no-store'});if(!r.ok)return;const d=await r.json();for(const ev of d.events||[]){last=Math.max(last,Number(ev.id||0));if(ev.event_type==='message.received'){unread++;const p=ev.payload||{};const badge=document.getElementById('live-badge');if(badge){badge.hidden=false;badge.textContent=unread>99?'99+':unread}document.dispatchEvent(new CustomEvent('welcome:new-message',{detail:p}));}}localStorage.setItem('welcome_live_{{ active_account.account_id }}',last)}catch(e){}}
+ tick();setInterval(tick,2000);
+})();
+{% endif %}
+</script></body></html>
