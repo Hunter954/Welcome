@@ -41,7 +41,7 @@ def init_db():
       '''CREATE TABLE IF NOT EXISTS media_cache (pk TEXT PRIMARY KEY,media_type TEXT,product_type TEXT,caption TEXT,thumbnail_url TEXT,media_url TEXT,taken_at TEXT,like_count INTEGER DEFAULT 0,comment_count INTEGER DEFAULT 0,raw_json TEXT DEFAULT '')''',
       '''CREATE TABLE IF NOT EXISTS comment_cache (pk TEXT PRIMARY KEY,media_pk TEXT,user_pk TEXT,username TEXT,text TEXT,created_at TEXT,replied INTEGER DEFAULT 0,raw_json TEXT DEFAULT '')''',
       f'''CREATE TABLE IF NOT EXISTS scheduled_posts (id {serial},kind TEXT DEFAULT 'photo',file_path TEXT,caption TEXT,status TEXT DEFAULT 'draft',scheduled_at TEXT,published_media_pk TEXT,error TEXT,created_at TEXT NOT NULL)''',
-      '''CREATE TABLE IF NOT EXISTS instagram_accounts (account_id TEXT PRIMARY KEY,ig_user_id TEXT UNIQUE,username TEXT,display_name TEXT DEFAULT '',avatar_url TEXT DEFAULT '',token_enc TEXT DEFAULT '',expires_at TEXT,provider TEXT DEFAULT 'meta',connected_at TEXT,last_webhook_at TEXT,status TEXT DEFAULT 'connected')''',
+      '''CREATE TABLE IF NOT EXISTS instagram_accounts (account_id TEXT PRIMARY KEY,ig_user_id TEXT UNIQUE,username TEXT,display_name TEXT DEFAULT '',avatar_url TEXT DEFAULT '',token_enc TEXT DEFAULT '',expires_at TEXT,provider TEXT DEFAULT 'meta',connected_at TEXT,last_webhook_at TEXT,last_sync_at TEXT,status TEXT DEFAULT 'connected')''',
       f'''CREATE TABLE IF NOT EXISTS realtime_events (id {serial},account_id TEXT NOT NULL,event_type TEXT NOT NULL,payload TEXT DEFAULT '',created_at TEXT NOT NULL)''',
     ]
     with conn() as c:
@@ -55,6 +55,7 @@ def init_db():
           "ALTER TABLE media_cache ADD COLUMN account_id TEXT DEFAULT ''",
           "ALTER TABLE comment_cache ADD COLUMN account_id TEXT DEFAULT ''",
           "ALTER TABLE scheduled_posts ADD COLUMN account_id TEXT DEFAULT ''",
+          "ALTER TABLE instagram_accounts ADD COLUMN last_sync_at TEXT",
         ]
         for migration in migrations:
           try: cur.execute(migration)
